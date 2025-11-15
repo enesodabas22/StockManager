@@ -1,0 +1,1951 @@
+import sys
+import sqlite3
+import hashlib
+import csv
+from datetime import datetime
+
+# Bildirimler için 'plyer' kütüphanesi
+try:
+    from plyer import notification
+
+    PLYER_MUMKUN = True
+except ImportError:
+    PLYER_MUMKUN = False
+    print("----------------------------------------------------------------")
+    print("UYARI: 'plyer' kütüphanesi bulunamadı.")
+    print("Masaüstü bildirimleri çalışmayacak.")
+    print("Kurmak için: pip install plyer")
+    print("----------------------------------------------------------------")
+
+from PyQt6.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
+    QLineEdit, QMessageBox, QTableWidget, QTableWidgetItem, QMenu, QDialog,
+    QFormLayout, QDialogButtonBox, QAbstractItemView, QFileDialog,
+    QMainWindow, QMenuBar, QCheckBox, QHeaderView, QFrame, QStackedWidget,
+    QListWidget, QListWidgetItem, QStatusBar, QInputDialog, QComboBox
+)
+from PyQt6.QtCore import Qt, pyqtSignal, QPoint
+from PyQt6.QtGui import QAction, QFont, QColor, QCursor, QPixmap, QDoubleValidator
+
+
+# =============================================================================
+# 1. HELPER CLASSES AND DATABASE MANAGEMENT
+# =============================================================================
+
+class NumericTableWidgetItem(QTableWidgetItem):
+    """A custom table widget item for proper numeric sorting."""
+
+    def __init__(self, display_text, sort_key):
+        super().__init__(display_text)
+        self.sort_key = sort_key
+
+    def __lt__(self, other):
+        if isinstance(other, NumericTableWidgetItem):
+            return self.sort_key < other.sort_key
+        return super().__lt__(other)
+
+
+class VeritabaniYoneticisi:
+    """Handles all database operations for the application."""
+
+    def __init__(self, db_adi="stok_veritabani.db"):
+        self.baglanti = sqlite3.connect(db_adi, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+        self.baglanti.execute("PRAGMA foreign_keys = ON")
+        self.cursor = self.baglanti.cursor()
+        self.veritabani_migrasyonu_kontrol_et()
+        self.tablolari_olustur()
+
+    def _sutun_tipi_getir(self, tablo_adi, sutun_adi):
+        """Helper to check column type for migration."""
+        try:
+            self.cursor.execute(f"PRAGMA table_info({tablo_adi})")
+            for row in self.cursor.fetchall():
+                if row[1] == sutun_adi:
+                    return row[2]  # type
+            return None
+        except sqlite3.OperationalError:
+            return None
+
+    def veritabani_migrasyonu_kontrol_et(self):
+        """Handles database schema updates."""
+        try:
+            self.cursor.execute("PRAGMA table_info(urunler)")
+            mevcut_sutunlar = [row[1] for row in self.cursor.fetchall()]
+
+            if 'urun_kodu' not in mevcut_sutunlar:
+                self.cursor.execute("ALTER TABLE urunler ADD COLUMN urun_kodu TEXT")
+                try:
+                    self.cursor.execute("UPDATE urunler SET urun_kodu = 'KOD-' || id WHERE urun_kodu IS NULL")
+                    self.cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_urun_kodu ON urunler(urun_kodu)")
+                except sqlite3.IntegrityError:
+                    print("UYARI: urun_kodu migrasyonunda çakışma.")
+
+            if 'birim' not in mevcut_sutunlar:
+                self.cursor.execute("ALTER TABLE urunler ADD COLUMN birim TEXT NOT NULL DEFAULT 'adet'")
+
+            if self._sutun_tipi_getir('urunler', 'miktar') == 'INTEGER':
+                print("Migrasyon: 'urunler.miktar' REAL'e dönüştürülüyor...")
+                self.cursor.execute("ALTER TABLE urunler RENAME TO urunler_eski")
+                self.tablolari_olustur()
+                self.cursor.execute("""
+                    INSERT INTO urunler (id, urun_kodu, ad, kategori, fiyat, miktar, min_stok, birim)
+                    SELECT id, urun_kodu, ad, kategori, fiyat, CAST(miktar AS REAL), CAST(min_stok AS REAL), 'adet'
+                    FROM urunler_eski
+                """)
+                self.cursor.execute("DROP TABLE urunler_eski")
+                print("Migrasyon: 'urunler' tamamlandı.")
+
+            if self._sutun_tipi_getir('stok_hareketleri', 'miktar_degisimi') == 'INTEGER':
+                print("Migrasyon: 'stok_hareketleri' REAL'e dönüştürülüyor...")
+                self.cursor.execute("ALTER TABLE stok_hareketleri RENAME TO stok_hareketleri_eski")
+                self.tablolari_olustur()
+                self.cursor.execute("""
+                    INSERT INTO stok_hareketleri (id, urun_id, kullanici_adi, islem_tipi, miktar_degisimi, yeni_miktar, tarih, notlar)
+                    SELECT id, urun_id, kullanici_adi, islem_tipi, CAST(miktar_degisimi AS REAL), CAST(yeni_miktar AS REAL), tarih, notlar
+                    FROM stok_hareketleri_eski
+                """)
+                self.cursor.execute("DROP TABLE stok_hareketleri_eski")
+                print("Migrasyon: 'stok_hareketleri' tamamlandı.")
+
+            self.baglanti.commit()
+
+        except sqlite3.OperationalError:
+            pass
+
+    def tablolari_olustur(self):
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS urunler (
+                id INTEGER PRIMARY KEY,
+                urun_kodu TEXT UNIQUE NOT NULL,
+                ad TEXT NOT NULL,
+                kategori TEXT,
+                fiyat REAL NOT NULL DEFAULT 0.0,
+                miktar REAL NOT NULL,
+                birim TEXT NOT NULL DEFAULT 'adet',
+                min_stok REAL NOT NULL DEFAULT 10
+            )""")
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS kullanicilar (
+                id INTEGER PRIMARY KEY,
+                kullanici_adi TEXT NOT NULL UNIQUE,
+                sifre_hash TEXT NOT NULL
+            )""")
+
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS stok_hareketleri (
+                id INTEGER PRIMARY KEY,
+                urun_id INTEGER,
+                kullanici_adi TEXT,
+                islem_tipi TEXT NOT NULL, 
+                miktar_degisimi REAL NOT NULL,
+                yeni_miktar REAL,
+                tarih TIMESTAMP,
+                notlar TEXT,
+                FOREIGN KEY (urun_id) REFERENCES urunler(id) ON DELETE SET NULL
+            )""")
+
+        self.baglanti.commit()
+
+    def _stok_hareketi_kaydet(self, urun_id, kullanici_adi, islem_tipi, miktar_degisimi, yeni_miktar, notlar=""):
+        try:
+            guncel_tarih = datetime.now()
+            self.cursor.execute("""
+                INSERT INTO stok_hareketleri (urun_id, kullanici_adi, islem_tipi, miktar_degisimi, yeni_miktar, notlar, tarih)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (urun_id, kullanici_adi, islem_tipi, miktar_degisimi, yeni_miktar, notlar, guncel_tarih))
+        except Exception as e:
+            print(f"Stok hareketi kaydedilemedi: {e}")
+
+    def urunleri_getir(self):
+        self.cursor.execute(
+            "SELECT id, urun_kodu, ad, kategori, fiyat, miktar, birim, min_stok FROM urunler ORDER BY ad ASC")
+        return self.cursor.fetchall()
+
+    def dusuk_stok_urunleri_getir(self):
+        self.cursor.execute(
+            "SELECT id, urun_kodu, ad, kategori, fiyat, miktar, birim, min_stok FROM urunler WHERE miktar <= min_stok ORDER BY ad ASC")
+        return self.cursor.fetchall()
+
+    def urun_detay_getir(self, urun_id):
+        self.cursor.execute(
+            "SELECT id, urun_kodu, ad, kategori, fiyat, miktar, birim, min_stok FROM urunler WHERE id = ?", (urun_id,))
+        return self.cursor.fetchone()
+
+    def urun_ekle(self, urun_kodu, ad, kategori, fiyat, miktar, birim, min_stok, kullanici_adi):
+        self.cursor.execute("SELECT id, miktar FROM urunler WHERE urun_kodu = ?", (urun_kodu,))
+        mevcut = self.cursor.fetchone()
+
+        if mevcut:
+            urun_id, mevcut_miktar = mevcut
+            yeni_miktar = mevcut_miktar + miktar
+            self.cursor.execute("UPDATE urunler SET miktar = ? WHERE id = ?", (yeni_miktar, urun_id))
+
+            self._stok_hareketi_kaydet(urun_id, kullanici_adi, "STOK EKLEME", miktar, yeni_miktar, "Formdan eklendi")
+            self.baglanti.commit()
+            return True, f"Mevcut '{urun_kodu}' kodlu ürünün stoğu güncellendi."
+
+        else:
+            self.cursor.execute("SELECT id FROM urunler WHERE ad = ?", (ad,))
+            if self.cursor.fetchone():
+                return False, f"'{ad}' adında bir ürün zaten farklı bir kod ile kayıtlı."
+
+            try:
+                self.cursor.execute(
+                    "INSERT INTO urunler (urun_kodu, ad, kategori, fiyat, miktar, birim, min_stok) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (urun_kodu, ad, kategori, fiyat, miktar, birim, min_stok))
+                urun_id = self.cursor.lastrowid
+
+                self._stok_hareketi_kaydet(urun_id, kullanici_adi, "YENİ ÜRÜN", miktar, miktar, "Yeni kayıt")
+                self.baglanti.commit()
+                return True, f"Yeni ürün '{ad}' eklendi."
+            except sqlite3.IntegrityError:
+                self.baglanti.rollback()
+                return False, f"'{urun_kodu}' ürün kodu başkası tarafından kullanılıyor."
+            except Exception as e:
+                self.baglanti.rollback()
+                return False, f"Bir hata oluştu: {e}"
+
+    def urun_detay_guncelle(self, urun_id, yeni_ad, kategori, fiyat, birim, min_stok, kullanici_adi):
+        try:
+            self.cursor.execute(
+                "UPDATE urunler SET ad = ?, kategori = ?, fiyat = ?, birim = ?, min_stok = ? WHERE id = ?",
+                (yeni_ad, kategori, fiyat, birim, min_stok, urun_id))
+
+            notlar = f"Detaylar güncellendi (Birim: {birim}, MinStok: {min_stok})"
+            self.cursor.execute("SELECT miktar FROM urunler WHERE id = ?", (urun_id,))
+            mevcut_miktar = self.cursor.fetchone()[0]
+            self._stok_hareketi_kaydet(urun_id, kullanici_adi, "DETAY GÜNCELLEME", 0, mevcut_miktar, notlar)
+
+            self.baglanti.commit()
+            return True, "Güncellendi"
+        except Exception as e:
+            self.baglanti.rollback()
+            return False, f"Hata: {e}"
+
+    def urun_miktar_guncelle(self, urun_id, miktar_farki, kullanici_adi):
+        mevcut_miktar = self.mevcut_miktar_getir(urun_id)
+        yeni_miktar = mevcut_miktar + miktar_farki
+        if yeni_miktar < 0:
+            return False, "Stok eksiye düşemez."
+
+        self.cursor.execute("UPDATE urunler SET miktar = ? WHERE id = ?", (yeni_miktar, urun_id))
+
+        islem_tipi = "STOK EKLEME" if miktar_farki > 0 else "STOK ÇIKIŞI"
+        self._stok_hareketi_kaydet(urun_id, kullanici_adi, islem_tipi, miktar_farki, yeni_miktar, "Manuel işlem")
+
+        self.baglanti.commit()
+        return True, "Miktar güncellendi."
+
+    def urun_sil(self, urun_id, kullanici_adi):
+        mevcut_miktar = self.mevcut_miktar_getir(urun_id)
+        self._stok_hareketi_kaydet(urun_id, kullanici_adi, "ÜRÜN SİLME", -mevcut_miktar, 0, "Ürün sistemden silindi")
+
+        self.cursor.execute("DELETE FROM urunler WHERE id = ?", (urun_id,))
+        self.baglanti.commit()
+
+    def mevcut_miktar_getir(self, urun_id):
+        self.cursor.execute("SELECT miktar FROM urunler WHERE id = ?", (urun_id,))
+        sonuc = self.cursor.fetchone()
+        return sonuc[0] if sonuc else 0
+
+    def urun_hucre_guncelle(self, urun_id, sutun_adi, yeni_deger, kullanici_adi):
+        izin_verilen_sutunlar = ['kategori', 'fiyat']
+        if sutun_adi not in izin_verilen_sutunlar:
+            return False, "Geçersiz güncelleme alanı."
+        try:
+            self.cursor.execute(f"UPDATE urunler SET {sutun_adi} = ? WHERE id = ?", (yeni_deger, urun_id))
+
+            self.cursor.execute("SELECT miktar FROM urunler WHERE id = ?", (urun_id,))
+            mevcut_miktar = self.cursor.fetchone()[0]
+            notlar = f"Hızlı düzenleme: {sutun_adi} -> {yeni_deger}"
+            self._stok_hareketi_kaydet(urun_id, kullanici_adi, "DETAY GÜNCELLEME", 0, mevcut_miktar, notlar)
+
+            self.baglanti.commit()
+            return True, "Güncellendi."
+        except Exception as e:
+            self.baglanti.rollback()
+            return False, f"Veritabanı hatası: {e}"
+
+    def stok_hareketlerini_getir(self, zaman_araligi='tumu'):
+        sorgu = """
+            SELECT h.tarih, h.kullanici_adi, u.urun_kodu, u.ad, h.islem_tipi, h.miktar_degisimi, h.yeni_miktar, u.birim, h.notlar
+            FROM stok_hareketleri h
+            LEFT JOIN urunler u ON h.urun_id = u.id
+        """
+
+        if zaman_araligi == 'haftalik':
+            sorgu += " WHERE h.tarih >= date('now', '-7 day')"
+        elif zaman_araligi == 'aylik':
+            sorgu += " WHERE h.tarih >= date('now', '-30 day')"
+
+        sorgu += " ORDER BY h.tarih DESC"
+
+        self.cursor.execute(sorgu)
+        return self.cursor.fetchall()
+
+    def genel_bakis_getir(self):
+        try:
+            urun_cesidi = self.cursor.execute("SELECT COUNT(id) FROM urunler").fetchone()[0]
+            toplam_stok_degeri = self.cursor.execute("SELECT SUM(fiyat * miktar) FROM urunler").fetchone()[0]
+            dusuk_stok_sayisi = \
+                self.cursor.execute("SELECT COUNT(id) FROM urunler WHERE miktar <= min_stok").fetchone()[0]
+            return {
+                "urun_cesidi": urun_cesidi or 0,
+                "toplam_deger": toplam_stok_degeri or 0.0,
+                "dusuk_stok": dusuk_stok_sayisi or 0
+            }
+        except Exception:
+            return {"urun_cesidi": 0, "toplam_deger": 0.0, "dusuk_stok": 0}
+
+    # --- Kullanıcı Yönetimi ---
+    def kullanici_sayisi_getir(self):
+        self.cursor.execute("SELECT COUNT(*) FROM kullanicilar")
+        return self.cursor.fetchone()[0]
+
+    def sifre_hashle(self, s):
+        return hashlib.sha256(s.encode()).hexdigest()
+
+    def kullanici_ekle(self, k_adi, s):
+        if not k_adi or not s:
+            return False, "Kullanıcı adı ve şifre boş bırakılamaz."
+        try:
+            self.cursor.execute("INSERT INTO kullanicilar (kullanici_adi, sifre_hash) VALUES (?, ?)",
+                                (k_adi, self.sifre_hashle(s)))
+            self.baglanti.commit()
+            return True, "Kullanıcı oluşturuldu."
+        except sqlite3.IntegrityError:
+            self.baglanti.rollback()
+            return False, "Bu kullanıcı adı zaten alınmış."
+
+    def kullanici_dogrula(self, k_adi, s):
+        self.cursor.execute("SELECT * FROM kullanicilar WHERE kullanici_adi = ? AND sifre_hash = ?",
+                            (k_adi, self.sifre_hashle(s)))
+        return self.cursor.fetchone() is not None
+
+    def kullanici_bilgilerini_guncelle(self, e_kadi, y_kadi, y_sifre):
+        try:
+            self.cursor.execute("UPDATE kullanicilar SET kullanici_adi = ?, sifre_hash = ? WHERE kullanici_adi = ?",
+                                (y_kadi, self.sifre_hashle(y_sifre), e_kadi))
+            self.baglanti.commit()
+            return True, "Bilgiler güncellendi."
+        except sqlite3.IntegrityError:
+            self.baglanti.rollback()
+            return False, "Yeni kullanıcı adı başkası tarafından kullanılıyor."
+
+
+# =============================================================================
+# 3. DIALOG WINDOWS
+# =============================================================================
+
+class UrunDuzenlemeDialog(QDialog):
+    def __init__(self, urun_detaylari, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Ürün Bilgilerini Düzenle")
+        self.form_layout = QFormLayout(self)
+
+        self.urun_id = urun_detaylari[0]
+        self.urun_kodu_label = QLabel(urun_detaylari[1])
+        self.ad_input = QLineEdit(urun_detaylari[2])
+        self.kategori_input = QLineEdit(urun_detaylari[3])
+        self.fiyat_input = QLineEdit(str(urun_detaylari[4]))
+
+        self.birim_input = QComboBox()
+        # <-- GÜNCELLENDİ: Birimler sadeleştirildi -->
+        self.birim_input.addItems(["adet", "kg", "litre"])
+        self.birim_input.setCurrentText(urun_detaylari[6])  # birim
+
+        self.min_stok_input = QLineEdit(str(urun_detaylari[7]))  # min_stok
+
+        self.form_layout.addRow("Ürün ID (Sistem):", QLabel(str(self.urun_id)))
+        self.form_layout.addRow("Ürün Kodu (SKU):", self.urun_kodu_label)
+        self.form_layout.addRow("Ürün Adı:", self.ad_input)
+        self.form_layout.addRow("Kategori:", self.kategori_input)
+        self.form_layout.addRow("Fiyat (₺):", self.fiyat_input)
+        self.form_layout.addRow("Birim:", self.birim_input)
+        self.form_layout.addRow("Min. Stok:", self.min_stok_input)
+
+        float_validator = QDoubleValidator()
+        float_validator.setBottom(0.0)
+        self.fiyat_input.setValidator(float_validator)
+        self.min_stok_input.setValidator(float_validator)
+
+        self.buttonBox = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttonBox.accepted.connect(self.accept)
+        self.buttonBox.rejected.connect(self.reject)
+        self.form_layout.addWidget(self.buttonBox)
+
+    def get_data(self):
+        try:
+            fiyat = float(self.fiyat_input.text().replace(',', '.'))
+            min_stok = float(self.min_stok_input.text().replace(',', '.'))
+            birim = self.birim_input.currentText()
+            ad = self.ad_input.text().strip().capitalize()
+            if not ad:
+                QMessageBox.warning(self, "Hata", "Ürün adı boş bırakılamaz.")
+                return None
+            return self.urun_id, ad, self.kategori_input.text(), fiyat, birim, min_stok
+        except ValueError:
+            QMessageBox.warning(self, "Hata", "Fiyat ve Min. Stok sayısal değer olmalıdır.")
+            return None
+
+
+class YeniKullaniciDialog(QDialog):
+    def __init__(self, veritabani_yoneticisi, parent=None):
+        super().__init__(parent)
+        self.veritabani = veritabani_yoneticisi
+        self.setWindowTitle("Yeni Kullanıcı Oluştur")
+        self.setObjectName("authWindow")
+        self.setMinimumWidth(400)
+
+        self.ana_layout = QVBoxLayout(self)
+
+        logo_layout = QVBoxLayout()
+        logo_layout.setContentsMargins(0, 10, 0, 20)
+
+        # <-- YENİ: Logo geri geldi (BaseAuthWindow'dan kopyalandı) -->
+        logo_icon = QLabel()
+        logo_icon.setObjectName("logoIcon")
+        try:
+            logo_pixmap = QPixmap("StockFlow_Logo.png")
+            if not logo_pixmap.isNull():
+                logo_icon.setPixmap(logo_pixmap.scaled(200, 50, Qt.AspectRatioMode.KeepAspectRatio,
+                                                       Qt.TransformationMode.SmoothTransformation))
+                logo_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            else:
+                raise FileNotFoundError
+        except FileNotFoundError:
+            logo_icon.setText("📦")
+            logo_icon.setStyleSheet("font-size: 48px; qproperty-alignment: AlignCenter;")
+
+        logo_text = QLabel("Yeni Hesap Oluştur")
+        logo_text.setObjectName("logoText")
+        logo_text.setStyleSheet("font-size: 20px; font-weight: bold; qproperty-alignment: AlignCenter;")
+
+        logo_layout.addWidget(logo_icon)
+        logo_layout.addWidget(logo_text)
+        self.ana_layout.addLayout(logo_layout)
+
+        layout = QFormLayout()
+        layout.setContentsMargins(20, 0, 20, 0)
+        layout.setVerticalSpacing(15)
+
+        self.k_adi = QLineEdit()
+        self.k_adi.setPlaceholderText("Yeni Kullanıcı Adı")
+        self.sifre = QLineEdit()
+        self.sifre.setPlaceholderText("Şifre")
+        self.sifre.setEchoMode(QLineEdit.EchoMode.Password)
+        self.sifre_t = QLineEdit()
+        self.sifre_t.setPlaceholderText("Şifre Tekrar")
+        self.sifre_t.setEchoMode(QLineEdit.EchoMode.Password)
+
+        layout.addRow("Kullanıcı Adı:", self.k_adi)
+        layout.addRow("Şifre:", self.sifre)
+        layout.addRow("Şifre Tekrar:", self.sifre_t)
+        self.ana_layout.addLayout(layout)
+
+        self.buttonBox = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttonBox.button(QDialogButtonBox.StandardButton.Ok).setText("Oluştur")
+        self.buttonBox.button(QDialogButtonBox.StandardButton.Cancel).setText("Geri")  # <-- YENİ
+        self.buttonBox.accepted.connect(self.hesap_olustur)
+        self.buttonBox.rejected.connect(self.reject)
+
+        self.ana_layout.addWidget(self.buttonBox)
+
+        self.sifre_t.returnPressed.connect(self.hesap_olustur)
+
+    def hesap_olustur(self):
+        k_adi = self.k_adi.text().strip()
+        sifre = self.sifre.text()
+        sifre_t = self.sifre_t.text()
+
+        if sifre != sifre_t:
+            QMessageBox.warning(self, "Hata", "Şifreler eşleşmiyor.")
+            return
+
+        basari, mesaj = self.veritabani.kullanici_ekle(k_adi, sifre)
+
+        if basari:
+            QMessageBox.information(self, "Başarılı",
+                                    f"'{k_adi}' kullanıcısı başarıyla oluşturuldu. Şimdi giriş yapabilirsiniz.")
+            self.accept()
+        else:
+            QMessageBox.warning(self, "Hata", mesaj)
+
+
+class FiltreDialog(QDialog):
+    def __init__(self, mevcut_filtreler=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Gelişmiş Filtrele")
+        self.setMinimumWidth(400)
+        layout = QFormLayout(self)
+        if mevcut_filtreler is None:
+            mevcut_filtreler = {}
+
+        self.min_fiyat = QLineEdit(str(mevcut_filtreler.get("min_fiyat", "")))
+        self.max_fiyat = QLineEdit(str(mevcut_filtreler.get("max_fiyat", "")))
+        fiyat_layout = QHBoxLayout()
+        fiyat_layout.addWidget(self.min_fiyat)
+        fiyat_layout.addWidget(QLabel("-"))
+        fiyat_layout.addWidget(self.max_fiyat)
+        layout.addRow("Fiyat Aralığı (₺):", fiyat_layout)
+
+        self.min_stok = QLineEdit(str(mevcut_filtreler.get("min_stok", "")))
+        self.max_stok = QLineEdit(str(mevcut_filtreler.get("max_stok", "")))
+        stok_layout = QHBoxLayout()
+        stok_layout.addWidget(self.min_stok)
+        stok_layout.addWidget(QLabel("-"))
+        stok_layout.addWidget(self.max_stok)
+        layout.addRow("Stok Aralığı:", stok_layout)
+
+        float_validator = QDoubleValidator()
+        float_validator.setBottom(0.0)
+        self.min_fiyat.setValidator(float_validator)
+        self.max_fiyat.setValidator(float_validator)
+        self.min_stok.setValidator(float_validator)
+        self.max_stok.setValidator(float_validator)
+
+        self.sadece_dusuk_stok = QCheckBox("Sadece düşük stoktakileri göster")
+        self.sadece_dusuk_stok.setChecked(mevcut_filtreler.get("dusuk_stok_only", False))
+        layout.addRow("", self.sadece_dusuk_stok)
+
+        self.buttonBox = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel |
+            QDialogButtonBox.StandardButton.Reset)
+        self.buttonBox.button(QDialogButtonBox.StandardButton.Ok).setText("Filtrele")
+        self.buttonBox.button(QDialogButtonBox.StandardButton.Reset).setText("Filtreyi Temizle")
+
+        self.buttonBox.accepted.connect(self.accept)
+        self.buttonBox.rejected.connect(self.reject)
+        self.buttonBox.button(QDialogButtonBox.StandardButton.Reset).clicked.connect(self.filtreyi_temizle_ve_kapat)
+        layout.addWidget(self.buttonBox)
+        self.reset_requested = False
+
+    def filtreyi_temizle_ve_kapat(self):
+        self.reset_requested = True
+        self.accept()
+
+    def get_filtreler(self):
+        def to_float(widget):
+            try:
+                return float(widget.text().replace(',', '.'))
+            except ValueError:
+                return None
+
+        return {
+            "min_fiyat": to_float(self.min_fiyat), "max_fiyat": to_float(self.max_fiyat),
+            "min_stok": to_float(self.min_stok), "max_stok": to_float(self.max_stok),
+            "dusuk_stok_only": self.sadece_dusuk_stok.isChecked()
+        }
+
+
+# =============================================================================
+# 4. UI WIDGETS AND PAGES
+# =============================================================================
+
+class DusukStokSayfasi(QWidget):
+    def __init__(self, veritabani_yoneticisi, parent=None):
+        super().__init__(parent)
+        self.veritabani = veritabani_yoneticisi
+        self.arayuz_olustur()
+        self.stogu_guncelle()
+
+    def arayuz_olustur(self):
+        ana_duzen = QVBoxLayout(self)
+        ana_duzen.setContentsMargins(25, 25, 25, 25)
+        ana_duzen.setSpacing(20)
+
+        yenile_btn = QPushButton("🔄 Listeyi Yenile")
+        yenile_btn.clicked.connect(self.stogu_guncelle)
+        yenile_btn.setFixedWidth(200)
+        ana_duzen.addWidget(yenile_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        self.stok_tablosu = QTableWidget()
+        self.stok_tablosu.setObjectName("stokTablosu")
+        self.stok_tablosu.setColumnCount(7)
+        self.stok_tablosu.setHorizontalHeaderLabels(
+            ["ID", "Ürün Kodu", "Ürün Adı", "Kategori", "Mevcut Miktar", "Birim", "Min. Stok"])
+
+        header = self.stok_tablosu.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+
+        self.stok_tablosu.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.stok_tablosu.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.stok_tablosu.setSortingEnabled(True)
+        self.stok_tablosu.sortByColumn(2, Qt.SortOrder.AscendingOrder)
+        ana_duzen.addWidget(self.stok_tablosu, 1)
+
+    def stogu_guncelle(self):
+        self.stok_tablosu.setSortingEnabled(False)
+        self.stok_tablosu.setRowCount(0)
+        urun_listesi = self.veritabani.dusuk_stok_urunleri_getir()
+        self.stok_tablosu.setRowCount(len(urun_listesi))
+
+        for satir, (id_val, urun_kodu, ad, kategori, fiyat, miktar, birim, min_stok) in enumerate(urun_listesi):
+            id_item = NumericTableWidgetItem(str(id_val), id_val)
+            kod_item = QTableWidgetItem(urun_kodu)
+            ad_item = QTableWidgetItem(ad)
+            kategori_item = QTableWidgetItem(kategori)
+
+            miktar_str = f"{miktar:g}"
+            min_stok_str = f"{min_stok:g}"
+
+            miktar_item = NumericTableWidgetItem(miktar_str, miktar)
+            birim_item = QTableWidgetItem(birim)
+            min_stok_item = NumericTableWidgetItem(min_stok_str, min_stok)
+
+            id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            kod_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            miktar_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            birim_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            min_stok_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            self.stok_tablosu.setItem(satir, 0, id_item)
+            self.stok_tablosu.setItem(satir, 1, kod_item)
+            self.stok_tablosu.setItem(satir, 2, ad_item)
+            self.stok_tablosu.setItem(satir, 3, kategori_item)
+            self.stok_tablosu.setItem(satir, 4, miktar_item)
+            self.stok_tablosu.setItem(satir, 5, birim_item)
+            self.stok_tablosu.setItem(satir, 6, min_stok_item)
+
+            for col in range(self.stok_tablosu.columnCount()):
+                item = self.stok_tablosu.item(satir, col)
+                if item:
+                    item.setBackground(QColor("#4a1f2c"))
+
+            miktar_item.setText(f"⚠️ {miktar_str}")
+            miktar_item.setForeground(QColor("#f87171"))
+
+        self.stok_tablosu.resizeRowsToContents()
+        self.stok_tablosu.setSortingEnabled(True)
+
+
+class StokHareketSayfasi(QWidget):
+    def __init__(self, veritabani_yoneticisi, kullanici_adi, parent=None):
+        super().__init__(parent)
+        self.veritabani = veritabani_yoneticisi
+        self.kullanici_adi = kullanici_adi
+        self.arayuz_olustur()
+        self.raporu_guncelle()
+
+    def arayuz_olustur(self):
+        ana_duzen = QVBoxLayout(self)
+        ana_duzen.setContentsMargins(25, 25, 25, 25)
+        ana_duzen.setSpacing(20)
+
+        ust_bar = QHBoxLayout()
+        ust_bar.addWidget(QLabel("Zaman Aralığı:"))
+        self.zaman_filtresi = QComboBox()
+        self.zaman_filtresi.addItem("Tüm Zamanlar", "tumu")
+        self.zaman_filtresi.addItem("Son 30 Gün", "aylik")
+        self.zaman_filtresi.addItem("Son 7 Gün", "haftalik")
+        self.zaman_filtresi.setFixedWidth(150)
+        self.zaman_filtresi.currentIndexChanged.connect(self.raporu_guncelle)
+        ust_bar.addWidget(self.zaman_filtresi)
+
+        yenile_btn = QPushButton("🔄 Raporu Yenile")
+        yenile_btn.setFixedWidth(200)
+        yenile_btn.clicked.connect(self.raporu_guncelle)
+
+        ust_bar.addStretch()
+        ust_bar.addWidget(yenile_btn)
+        ana_duzen.addLayout(ust_bar)
+
+        self.rapor_tablosu = QTableWidget()
+        self.rapor_tablosu.setObjectName("stokTablosu")
+        self.rapor_tablosu.setColumnCount(9)
+        self.rapor_tablosu.setHorizontalHeaderLabels(
+            ["Tarih", "Kullanıcı", "Ürün Kodu", "Ürün Adı", "İşlem", "Değişim", "Yeni Miktar", "Birim", "Notlar"])
+
+        header = self.rapor_tablosu.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(8, QHeaderView.ResizeMode.Stretch)
+
+        self.rapor_tablosu.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.rapor_tablosu.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.rapor_tablosu.setSortingEnabled(True)
+        self.rapor_tablosu.sortByColumn(0, Qt.SortOrder.DescendingOrder)
+        ana_duzen.addWidget(self.rapor_tablosu, 1)
+
+    def raporu_guncelle(self):
+        self.rapor_tablosu.setSortingEnabled(False)
+        self.rapor_tablosu.setRowCount(0)
+
+        zaman_araligi = self.zaman_filtresi.currentData()
+        hareket_listesi = self.veritabani.stok_hareketlerini_getir(zaman_araligi)
+
+        self.rapor_tablosu.setRowCount(len(hareket_listesi))
+        for satir, (tarih, kullanici, kod, ad, islem, degisim, yeni_miktar, birim, notlar) in enumerate(
+                hareket_listesi):
+
+            tarih_str = tarih.strftime("%Y-%m-%d %H:%M") if isinstance(tarih, datetime) else str(tarih)
+
+            tarih_item = QTableWidgetItem(tarih_str)
+            kullanici_item = QTableWidgetItem(kullanici)
+            kod_item = QTableWidgetItem(kod if kod else "N/A")
+            ad_item = QTableWidgetItem(ad if ad else "SİLİNMİŞ ÜRÜN")
+            islem_item = QTableWidgetItem(islem)
+
+            degisim_str = f"{degisim:+g}"
+            yeni_miktar_str = f"{yeni_miktar:g}" if yeni_miktar is not None else "N/A"
+
+            degisim_item = NumericTableWidgetItem(degisim_str, degisim)
+            yeni_miktar_item = NumericTableWidgetItem(yeni_miktar_str, yeni_miktar or 0)
+            birim_item = QTableWidgetItem(birim if birim else "N/A")
+            notlar_item = QTableWidgetItem(notlar)
+
+            degisim_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            yeni_miktar_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            islem_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            birim_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            self.rapor_tablosu.setItem(satir, 0, tarih_item)
+            self.rapor_tablosu.setItem(satir, 1, kullanici_item)
+            self.rapor_tablosu.setItem(satir, 2, kod_item)
+            self.rapor_tablosu.setItem(satir, 3, ad_item)
+            self.rapor_tablosu.setItem(satir, 4, islem_item)
+            self.rapor_tablosu.setItem(satir, 5, degisim_item)
+            self.rapor_tablosu.setItem(satir, 6, yeni_miktar_item)
+            self.rapor_tablosu.setItem(satir, 7, birim_item)
+            self.rapor_tablosu.setItem(satir, 8, notlar_item)
+
+            if islem == "STOK EKLEME" or islem == "YENİ ÜRÜN":
+                color = QColor("#1c3d34")
+                degisim_item.setForeground(QColor("#4ade80"))
+            elif islem == "STOK ÇIKIŞI" or islem == "ÜRÜN SİLME":
+                color = QColor("#4a1f2c")
+                degisim_item.setForeground(QColor("#f87171"))
+            else:
+                color = QColor("#1e293b")
+
+            for col in [4, 5]:
+                self.rapor_tablosu.item(satir, col).setBackground(color)
+
+        self.rapor_tablosu.resizeRowsToContents()
+        self.rapor_tablosu.setSortingEnabled(True)
+
+
+class AnaStokSayfasi(QWidget):
+    def __init__(self, veritabani_yoneticisi, status_bar, kullanici_adi):
+        super().__init__()
+        self.veritabani = veritabani_yoneticisi
+        self.status_bar = status_bar
+        self.kullanici_adi = kullanici_adi
+        self.guncel_filtreler = {}
+
+        self.float_validator = QDoubleValidator()
+        self.float_validator.setBottom(0.0)
+        self.float_validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+
+        self.arayuz_olustur()
+        self.stogu_guncelle_arayuz()
+
+    def create_metric_card(self, parent_layout, icon, title, value, unit):
+        card_frame = QFrame()
+        card_frame.setObjectName("metricCard")
+        card_layout = QVBoxLayout(card_frame)
+        card_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_label = QLabel(icon)
+        icon_label.setObjectName("metricIcon")
+        title_label = QLabel(title)
+        title_label.setObjectName("metricTitle")
+        value_layout = QHBoxLayout()
+        value_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        value_label = QLabel(value)
+        value_label.setObjectName("metricValue")
+        unit_label = QLabel(unit)
+        unit_label.setObjectName("metricUnit")
+        value_layout.addWidget(value_label)
+        value_layout.addWidget(unit_label)
+        card_layout.addWidget(icon_label)
+        card_layout.addWidget(title_label)
+        card_layout.addLayout(value_layout)
+        if not hasattr(self, 'metric_cards'):
+            self.metric_cards = {}
+        if title == "Ürün Çeşidi":
+            self.metric_cards['urun_cesidi'] = value_label
+        elif title == "Toplam Değer":
+            self.metric_cards['toplam_deger'] = value_label
+        elif title == "Düşük Stok":
+            self.metric_cards['dusuk_stok'] = value_label
+        parent_layout.addWidget(card_frame, 1)
+
+    def arayuz_olustur(self):
+        ana_duzen = QVBoxLayout(self)
+        ana_duzen.setContentsMargins(25, 25, 25, 25)
+        ana_duzen.setSpacing(20)
+
+        dashboard_layout = QHBoxLayout()
+        dashboard_layout.setSpacing(20)
+        self.create_metric_card(dashboard_layout, "   📦", "Ürün Çeşidi", "0", "adet")
+        self.create_metric_card(dashboard_layout, "    💰", "Toplam Değer", "0", "")
+        self.create_metric_card(dashboard_layout, "   ⚠️", "Düşük Stok", "0", "ürün")
+        ana_duzen.addLayout(dashboard_layout)
+
+        ust_duzen = QHBoxLayout()
+        ust_duzen.setSpacing(12)
+        search_container = QFrame()
+        search_container.setObjectName("searchContainer")
+        search_layout = QHBoxLayout(search_container)
+        search_layout.setContentsMargins(0, 0, 0, 0)
+        search_layout.setSpacing(0)
+        self.arama_input = QLineEdit()
+        self.arama_input.setPlaceholderText("🔍 Ürün kodu, adı, kategori veya fiyat ile ara...")
+        self.arama_input.setObjectName("searchInput")
+        self.arama_input.setClearButtonEnabled(True)
+        self.arama_input.textChanged.connect(lambda: self.tabloyu_filtrele())
+        search_layout.addWidget(self.arama_input)
+        ust_duzen.addWidget(search_container, 1)
+        action_container = QHBoxLayout()
+        self.filter_btn = QPushButton("🔽 Filtrele")
+        self.filter_btn.setObjectName("filterBtn")
+        self.filter_btn.clicked.connect(self.show_filter_dialog)
+        self.yeni_urun_goster_btn = QPushButton("➕ Yeni Ürün / Stok Ekle")
+        self.yeni_urun_goster_btn.setObjectName("yeniUrunBtn")
+        self.yeni_urun_goster_btn.clicked.connect(self.yeni_urun_formu_goster_gizle)
+        action_container.addWidget(self.filter_btn)
+        action_container.addWidget(self.yeni_urun_goster_btn)
+        ust_duzen.addLayout(action_container)
+        ana_duzen.addLayout(ust_duzen)
+
+        self.ekleme_formu_frame = QFrame()
+        self.ekleme_formu_frame.setObjectName("eklemeFormu")
+        ekleme_duzen = QFormLayout(self.ekleme_formu_frame)
+
+        self.yeni_urun_kodu_input = QLineEdit()
+        self.yeni_urun_kodu_input.setInputMask("0000000000000")
+
+        self.yeni_urun_input = QLineEdit()
+        self.yeni_kategori_input = QLineEdit()
+
+        self.yeni_fiyat_input = QLineEdit()
+        self.yeni_fiyat_input.setValidator(self.float_validator)
+
+        miktar_layout = QHBoxLayout()
+        self.yeni_miktar_input = QLineEdit()
+        self.yeni_miktar_input.setValidator(self.float_validator)
+        self.yeni_birim_input = QComboBox()
+        # <-- GÜNCELLENDİ: Birimler sadeleştirildi -->
+        self.yeni_birim_input.addItems(["adet", "kg", "litre"])
+        self.yeni_birim_input.setFixedWidth(100)
+        miktar_layout.addWidget(self.yeni_miktar_input, 1)
+        miktar_layout.addWidget(self.yeni_birim_input)
+
+        self.yeni_min_stok_input = QLineEdit("10")
+        self.yeni_min_stok_input.setValidator(self.float_validator)
+
+        self.onayla_ekle_btn = QPushButton("✅ Onayla")
+
+        ekleme_duzen.addRow("Ürün Kodu (13 Hane):", self.yeni_urun_kodu_input)
+        ekleme_duzen.addRow("Ürün Adı:", self.yeni_urun_input)
+        ekleme_duzen.addRow("Kategori:", self.yeni_kategori_input)
+        ekleme_duzen.addRow("Fiyat (₺):", self.yeni_fiyat_input)
+        ekleme_duzen.addRow("Miktar / Birim:", miktar_layout)
+        ekleme_duzen.addRow("Min. Stok:", self.yeni_min_stok_input)
+        ekleme_duzen.addRow(self.onayla_ekle_btn)
+
+        form_notu = QLabel("Not: Mevcut bir 'Ürün Kodu' girerseniz, girilen miktar o ürünün stoğuna eklenecektir.")
+        form_notu.setObjectName("pageSubtitle")
+        ekleme_duzen.addRow(form_notu)
+
+        self.ekleme_formu_frame.hide()
+        ana_duzen.addWidget(self.ekleme_formu_frame)
+        self.onayla_ekle_btn.clicked.connect(self.yeni_urun_ekle)
+
+        self.stok_tablosu = QTableWidget()
+        self.stok_tablosu.setObjectName("stokTablosu")
+        self.stok_tablosu.setColumnCount(9)
+        self.stok_tablosu.setHorizontalHeaderLabels(
+            ["ID", "Ürün Kodu", "Ürün Adı", "Kategori", "Fiyat", "Miktar", "Birim", "Min. Stok", "İşlemler"])
+        header = self.stok_tablosu.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(8, QHeaderView.ResizeMode.ResizeToContents)
+
+        self.stok_tablosu.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.stok_tablosu.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
+        self.stok_tablosu.itemChanged.connect(self.hucre_degisikligini_kaydet)
+        self.stok_tablosu.setSortingEnabled(True)
+        self.stok_tablosu.sortByColumn(2, Qt.SortOrder.AscendingOrder)
+        ana_duzen.addWidget(self.stok_tablosu, 1)
+
+    def guncelle_dashboard(self):
+        veri = self.veritabani.genel_bakis_getir()
+        if hasattr(self, 'metric_cards'):
+            self.metric_cards['urun_cesidi'].setText(str(veri['urun_cesidi']))
+            self.metric_cards['toplam_deger'].setText(f"{veri['toplam_deger']:,.2f}₺")
+            self.metric_cards['dusuk_stok'].setText(str(veri['dusuk_stok']))
+            self.metric_cards['dusuk_stok'].setProperty("lowStock", veri['dusuk_stok'] > 0)
+            self.metric_cards['dusuk_stok'].style().polish(self.metric_cards['dusuk_stok'])
+
+    def stogu_guncelle_arayuz(self, urun_listesi=None):
+        self.guncelle_dashboard()
+        try:
+            self.stok_tablosu.itemChanged.disconnect(self.hucre_degisikligini_kaydet)
+        except TypeError:
+            pass
+        self.stok_tablosu.setSortingEnabled(False)
+        self.stok_tablosu.setRowCount(0)
+
+        if urun_listesi is None:
+            urun_listesi = self.veritabani.urunleri_getir()
+
+        self.stok_tablosu.setRowCount(len(urun_listesi))
+        for satir, (id_val, urun_kodu, ad, kategori, fiyat, miktar, birim, min_stok) in enumerate(urun_listesi):
+            id_item = NumericTableWidgetItem(str(id_val), id_val)
+            id_item.setData(Qt.ItemDataRole.UserRole, id_val)
+            kod_item = QTableWidgetItem(urun_kodu)
+            ad_item = QTableWidgetItem(ad)
+            kategori_item = QTableWidgetItem(kategori)
+            fiyat_item = NumericTableWidgetItem(f"{fiyat:.2f}₺", fiyat)
+
+            miktar_str = f"{miktar:g}"
+            min_stok_str = f"{min_stok:g}"
+
+            miktar_item = NumericTableWidgetItem(miktar_str, miktar)
+            birim_item = QTableWidgetItem(birim)
+            min_stok_item = NumericTableWidgetItem(min_stok_str, min_stok)
+
+            id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            kod_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            fiyat_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            miktar_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            birim_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            min_stok_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            id_item.setFlags(id_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            kod_item.setFlags(kod_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            ad_item.setFlags(ad_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            miktar_item.setFlags(miktar_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            birim_item.setFlags(birim_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            min_stok_item.setFlags(min_stok_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+
+            self.stok_tablosu.setItem(satir, 0, id_item)
+            self.stok_tablosu.setItem(satir, 1, kod_item)
+            self.stok_tablosu.setItem(satir, 2, ad_item)
+            self.stok_tablosu.setItem(satir, 3, kategori_item)
+            self.stok_tablosu.setItem(satir, 4, fiyat_item)
+            self.stok_tablosu.setItem(satir, 5, miktar_item)
+            self.stok_tablosu.setItem(satir, 6, birim_item)
+            self.stok_tablosu.setItem(satir, 7, min_stok_item)
+
+            if miktar <= min_stok:
+                for col in range(self.stok_tablosu.columnCount() - 1):
+                    self.stok_tablosu.item(satir, col).setBackground(QColor("#4a1f2c"))
+                miktar_item.setText(f"⚠️ {miktar_str}")
+                miktar_item.setForeground(QColor("#f87171"))
+
+            menu_btn = QPushButton("⋮")
+            menu_btn.setObjectName("menuButton")
+            menu_btn.clicked.connect(lambda checked, uid=id_val, u_ad=ad: self.guncelle_menusu_goster(uid, u_ad))
+
+            btn_container = QWidget()
+            btn_layout = QHBoxLayout(btn_container)
+            btn_layout.setContentsMargins(0, 0, 0, 0)
+            btn_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            btn_layout.addWidget(menu_btn)
+            self.stok_tablosu.setCellWidget(satir, 8, btn_container)
+
+        self.stok_tablosu.resizeRowsToContents()
+        self.stok_tablosu.setSortingEnabled(True)
+        self.tabloyu_filtrele()
+        self.stok_tablosu.itemChanged.connect(self.hucre_degisikligini_kaydet)
+
+    def guncelle_menusu_goster(self, urun_id, urun_adi_gosterim):
+        menu = QMenu(self)
+        duzenle = QAction("✏️ Bilgileri Düzenle (Detay)", self)
+        duzenle.triggered.connect(lambda: self.urun_duzenle(urun_id))
+        artir = QAction("📈 Stok Artır", self)
+        artir.triggered.connect(lambda: self.miktar_girdi_goster(urun_id, urun_adi_gosterim, 'artır'))
+        eksilt = QAction("📉 Stok Eksilt", self)
+        eksilt.triggered.connect(lambda: self.miktar_girdi_goster(urun_id, urun_adi_gosterim, 'eksilt'))
+        sil = QAction("🗑️ Ürünü Sil", self)
+        sil.setObjectName("dangerAction")
+        sil.triggered.connect(lambda: self.urun_sil(urun_id, urun_adi_gosterim))
+        menu.addAction(duzenle)
+        menu.addSeparator()
+        menu.addAction(artir)
+        menu.addAction(eksilt)
+        menu.addSeparator()
+        menu.addAction(sil)
+        menu.exec(QCursor.pos())
+
+    def urun_duzenle(self, urun_id):
+        urun_detaylari = self.veritabani.urun_detay_getir(urun_id)
+        if not urun_detaylari: return
+        dialog = UrunDuzenlemeDialog(urun_detaylari, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            veri = dialog.get_data()
+            if veri:
+                id_val, ad, kat, fiyat, birim, min_stok = veri
+                basari, mesaj = self.veritabani.urun_detay_guncelle(id_val, ad, kat, fiyat, birim, min_stok,
+                                                                    self.kullanici_adi)
+                if basari:
+                    self.stogu_guncelle_arayuz()
+                    self.status_bar.showMessage(f"'{ad}' güncellendi.", 3000)
+                else:
+                    QMessageBox.warning(self, "Güncelleme Hatası", mesaj)
+
+    def yeni_urun_ekle(self):
+        kod = self.yeni_urun_kodu_input.text()
+        if not self.yeni_urun_kodu_input.hasAcceptableInput():
+            QMessageBox.warning(self, "Uyarı", "Ürün Kodu 13 haneli olmalıdır.")
+            return
+
+        ad = self.yeni_urun_input.text().strip().capitalize()
+        kat = self.yeni_kategori_input.text().strip()
+        f_str = self.yeni_fiyat_input.text().strip()
+        m_str = self.yeni_miktar_input.text().strip()
+        min_s_str = self.yeni_min_stok_input.text().strip()
+        birim = self.yeni_birim_input.currentText()
+
+        if not m_str:
+            QMessageBox.warning(self, "Uyarı", "Miktar alanı zorunludur.")
+            return
+
+        mevcut_urun = self.veritabani.cursor.execute("SELECT id FROM urunler WHERE urun_kodu = ?", (kod,)).fetchone()
+        if not mevcut_urun and not all([ad, f_str, min_s_str]):
+            QMessageBox.warning(self, "Uyarı",
+                                "Yeni ürün eklerken (kod mevcut değilse) Ad, Fiyat ve Min. Stok alanları zorunludur.")
+            return
+
+        try:
+            m = float(m_str.replace(',', '.'))
+            f = float(f_str.replace(',', '.')) if f_str else 0.0
+            min_s = float(min_s_str.replace(',', '.')) if min_s_str else 10.0
+
+            if not (m > 0 and f >= 0 and min_s >= 0): raise ValueError()
+        except(ValueError):
+            QMessageBox.warning(self, "Hata", "Miktar, Fiyat ve Min. Stok pozitif sayı olmalıdır.")
+            return
+
+        basari, mesaj = self.veritabani.urun_ekle(kod, ad, kat, f, m, birim, min_s, self.kullanici_adi)
+
+        if basari:
+            self.stogu_guncelle_arayuz()
+            self.yeni_urun_formu_goster_gizle()
+            self.status_bar.showMessage(mesaj, 3000)
+            for item in [self.yeni_urun_kodu_input, self.yeni_urun_input, self.yeni_kategori_input,
+                         self.yeni_fiyat_input, self.yeni_miktar_input]:
+                item.clear()
+            self.yeni_min_stok_input.setText("10")
+            self.yeni_birim_input.setCurrentIndex(0)
+        else:
+            QMessageBox.warning(self, "Ekleme Hatası", mesaj)
+
+    def show_filter_dialog(self):
+        dialog = FiltreDialog(self.guncel_filtreler, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            if dialog.reset_requested:
+                self.guncel_filtreler = {}
+                self.status_bar.showMessage("Filtreler temizlendi.", 3000)
+                self.filter_btn.setText("🔽 Filtrele")
+                self.filter_btn.setProperty("filtered", False)
+            else:
+                self.guncel_filtreler = dialog.get_filtreler()
+                self.status_bar.showMessage("Gelişmiş filtreler uygulandı.", 3000)
+                self.filter_btn.setText("✔️ Filtreleniyor")
+                self.filter_btn.setProperty("filtered", True)
+            self.filter_btn.style().polish(self.filter_btn)
+        self.tabloyu_filtrele()
+
+    def tabloyu_filtrele(self):
+        metin_lower = self.arama_input.text().lower()
+        min_f, max_f = self.guncel_filtreler.get("min_fiyat"), self.guncel_filtreler.get("max_fiyat")
+        min_s, max_s = self.guncel_filtreler.get("min_stok"), self.guncel_filtreler.get("max_stok")
+        dusuk_stok_only = self.guncel_filtreler.get("dusuk_stok_only", False)
+
+        for i in range(self.stok_tablosu.rowCount()):
+            urun_kodu = self.stok_tablosu.item(i, 1).text().lower()
+            urun_adi = self.stok_tablosu.item(i, 2).text().lower()
+            kategori = self.stok_tablosu.item(i, 3).text().lower()
+            fiyat_text = self.stok_tablosu.item(i, 4).text().lower()
+
+            text_match = (metin_lower in urun_kodu or
+                          metin_lower in urun_adi or
+                          metin_lower in kategori or
+                          metin_lower in fiyat_text)
+
+            fiyat = self.stok_tablosu.item(i, 4).sort_key
+            miktar = self.stok_tablosu.item(i, 5).sort_key
+            min_stok_val = self.stok_tablosu.item(i, 7).sort_key
+
+            fiyat_match = (min_f is None or fiyat >= min_f) and (max_f is None or fiyat <= max_f)
+            stok_match = (min_s is None or miktar >= min_s) and (max_s is None or miktar <= max_s)
+            dusuk_stok_match = not dusuk_stok_only or miktar <= min_stok_val
+
+            is_visible = text_match and fiyat_match and stok_match and dusuk_stok_match
+            self.stok_tablosu.setRowHidden(i, not is_visible)
+
+    def yeni_urun_formu_goster_gizle(self):
+        if self.ekleme_formu_frame.isVisible():
+            self.ekleme_formu_frame.hide()
+        else:
+            self.ekleme_formu_frame.show()
+            self.yeni_urun_kodu_input.setFocus()
+
+    def miktar_girdi_goster(self, urun_id, urun_adi, mod):
+        fiil = "Artır" if mod == 'artır' else "Eksilt"
+        detaylar = self.veritabani.urun_detay_getir(urun_id)
+        if not detaylar: return
+
+        mevcut = detaylar[5]
+        birim = detaylar[6]
+
+        m, ok = QInputDialog.getDouble(self, f"Stok {fiil} - [{urun_adi}]",
+                                       f"Mevcut Miktar: {mevcut:g} {birim}\nLütfen miktarı girin:",
+                                       1.0, 0.0, 999999.0, 2)
+        if ok:
+            self.stok_miktari_degistir(urun_id, urun_adi, m if mod == 'artır' else -m)
+
+    def stok_miktari_degistir(self, urun_id, urun_adi, m_farki):
+        basari, mesaj = self.veritabani.urun_miktar_guncelle(urun_id, m_farki, self.kullanici_adi)
+        if basari:
+            self.stogu_guncelle_arayuz()
+            self.status_bar.showMessage(f"'{urun_adi}' stoğu güncellendi.", 3000)
+        else:
+            QMessageBox.warning(self, "Uyarı", mesaj)
+
+    def urun_sil(self, urun_id, urun_adi):
+        onay = QMessageBox.question(self, "Silmeyi Onayla",
+                                    f"<b>{urun_adi}</b> (ID: {urun_id}) ürününü silmek istediğinizden emin misiniz?",
+                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                    QMessageBox.StandardButton.No)
+        if onay == QMessageBox.StandardButton.Yes:
+            self.veritabani.urun_sil(urun_id, self.kullanici_adi)
+            self.stogu_guncelle_arayuz()
+            self.status_bar.showMessage(f"'{urun_adi}' silindi.", 3000)
+
+    def verileri_disa_aktar(self):
+        kayit_yolu, _ = QFileDialog.getSaveFileName(self, "CSV Olarak Dışa Aktar", "stok_raporu.csv",
+                                                    "CSV Dosyaları (*.csv)")
+        if not kayit_yolu: return
+        try:
+            urunler = self.veritabani.urunleri_getir()
+            with open(kayit_yolu, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f)
+                writer.writerow(["ID", "Urun Kodu", "Ad", "Kategori", "Fiyat", "Miktar", "Birim", "Min. Stok"])
+                writer.writerows(urunler)
+            self.status_bar.showMessage(f"Veriler '{kayit_yolu}' dosyasına aktarıldı.", 5000)
+        except Exception as e:
+            QMessageBox.critical(self, "Dışa Aktarma Hatası", f"Dosya yazılırken bir hata oluştu:\n{e}")
+
+    def hucre_degisikligini_kaydet(self, item):
+        satir, sutun = item.row(), item.column()
+        try:
+            urun_id = self.stok_tablosu.item(satir, 0).data(Qt.ItemDataRole.UserRole)
+        except Exception:
+            return
+        yeni_deger_str = item.text()
+
+        if sutun == 3:  # Kategori
+            basari, mesaj = self.veritabani.urun_hucre_guncelle(urun_id, "kategori", yeni_deger_str, self.kullanici_adi)
+        elif sutun == 4:  # Fiyat
+            try:
+                yeni_fiyat = float(yeni_deger_str.replace('₺', '').replace(',', '.').strip())
+                if yeni_fiyat < 0: raise ValueError("Fiyat negatif olamaz")
+                basari, mesaj = self.veritabani.urun_hucre_guncelle(urun_id, "fiyat", yeni_fiyat, self.kullanici_adi)
+                if basari:
+                    self.guncelle_dashboard()
+                    self.stok_tablosu.itemChanged.disconnect(self.hucre_degisikligini_kaydet)
+                    self.stok_tablosu.setItem(satir, sutun, NumericTableWidgetItem(f"{yeni_fiyat:.2f}₺", yeni_fiyat))
+                    self.stok_tablosu.itemChanged.connect(self.hucre_degisikligini_kaydet)
+            except ValueError:
+                basari, mesaj = False, "Lütfen geçerli bir pozitif sayı girin."
+        else:
+            return
+
+        if not basari:
+            QMessageBox.warning(self, "Hata", mesaj)
+            self.stogu_guncelle_arayuz()
+
+
+# =============================================================================
+# 5. MAIN APPLICATION WINDOW
+# =============================================================================
+
+class AnaPencere(QMainWindow):
+    def __init__(self, kullanici_adi, veritabani_yoneticisi):
+        super().__init__()
+        self.kullanici_adi = kullanici_adi
+        self.veritabani = veritabani_yoneticisi
+        self.onceki_sayfa_index = 0
+
+        self.setWindowTitle(f"StockFlow - {kullanici_adi}")
+        self.setGeometry(100, 100, 1400, 900)
+        self.setMinimumSize(1200, 700)
+
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+        self.main_layout = QHBoxLayout(self.central_widget)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
+
+        self.init_ui()
+        self.init_menu_actions()
+
+    def init_ui(self):
+        # Sidebar
+        self.sidebar = QFrame()
+        self.sidebar.setObjectName("sidebarFrame")
+        self.sidebar.setFixedWidth(256)
+        sidebar_layout = QVBoxLayout(self.sidebar)
+        sidebar_layout.setContentsMargins(12, 12, 12, 12)
+
+        # <-- YENİ: Logo QPixmap olarak geri geldi -->
+        logo_icon = QLabel()
+        logo_icon.setObjectName("logoIcon")
+        try:
+            logo_pixmap = QPixmap("StockFlow_Logo.png")
+            if not logo_pixmap.isNull():
+                logo_icon.setPixmap(logo_pixmap.scaled(200, 300, Qt.AspectRatioMode.KeepAspectRatio,
+                                                       Qt.TransformationMode.SmoothTransformation))
+                logo_icon.setMinimumHeight(50)  # Yüksekliği ayarla
+            else:
+                raise FileNotFoundError
+        except FileNotFoundError:
+            logo_icon.setText("📦")  # Fallback
+            logo_icon.setStyleSheet("font-size: 24px; padding: 0; margin: 0;")
+
+        # <-- YENİ: Logo metni kaldırıldı, resim kaplayacak -->
+        # logo_text = QLabel("StockFlow")
+        # logo_text.setObjectName("logoText")
+
+        logo_layout = QHBoxLayout()
+        logo_layout.addWidget(logo_icon)
+        # logo_layout.addWidget(logo_text)
+        logo_layout.addStretch()
+
+        self.nav_list = QListWidget()
+        self.nav_list.setObjectName("sidebarNav")
+        self.nav_list.addItem(QListWidgetItem("📋   Ana Stok Listesi"))
+        self.nav_list.addItem(QListWidgetItem("⚠️   Düşük Stok Uyarıları"))
+        self.nav_list.addItem(QListWidgetItem("📜   Stok Hareketleri"))
+
+        source_button = QPushButton(f"Kullanıcı: {self.kullanici_adi}")
+        source_button.setObjectName("sourceButton")
+        source_button.setEnabled(False)
+
+        sidebar_layout.addLayout(logo_layout)
+        sidebar_layout.addWidget(QLabel("NAVİGASYON"), 0, Qt.AlignmentFlag.AlignLeft)
+        sidebar_layout.addWidget(self.nav_list)
+        sidebar_layout.addStretch()
+        sidebar_layout.addWidget(source_button)
+        self.main_layout.addWidget(self.sidebar)
+
+        # Content Area
+        content_container = QFrame()
+        content_container.setObjectName("contentContainer")
+        content_layout = QVBoxLayout(content_container)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+
+        header_bar = QFrame()
+        header_bar.setObjectName("headerBar")
+        header_bar_layout = QHBoxLayout(header_bar)
+        header_bar_layout.setContentsMargins(20, 10, 20, 10)
+
+        self.geri_btn = QPushButton("⬅️ Geri")
+        self.geri_btn.setObjectName("headerButton")
+        self.geri_btn.setFixedWidth(100)
+        self.geri_btn.clicked.connect(self.geri_git)
+
+        self.sayfa_basligi = QLabel("Ana Stok Listesi")
+        self.sayfa_basligi.setObjectName("pageTitle")
+
+        self.ayarlar_btn = QPushButton("⚙️ Ayarlar")
+        self.ayarlar_btn.setObjectName("headerButton")
+        self.ayarlar_btn.setFixedWidth(100)
+        self.ayarlar_btn.clicked.connect(self.ayarlar_menu_goster)
+
+        header_bar_layout.addWidget(self.geri_btn)
+        header_bar_layout.addStretch()
+        header_bar_layout.addWidget(self.sayfa_basligi)
+        header_bar_layout.addStretch()
+        header_bar_layout.addWidget(self.ayarlar_btn)
+
+        content_layout.addWidget(header_bar)
+
+        self.stacked_widget = QStackedWidget()
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+
+        self.ana_stok_sayfasi = AnaStokSayfasi(self.veritabani, self.status_bar, self.kullanici_adi)
+        self.dusuk_stok_sayfasi = DusukStokSayfasi(self.veritabani)
+        self.gecmis_sayfasi = StokHareketSayfasi(self.veritabani, self.kullanici_adi)
+
+        self.stacked_widget.addWidget(self.ana_stok_sayfasi)
+        self.stacked_widget.addWidget(self.dusuk_stok_sayfasi)
+        self.stacked_widget.addWidget(self.gecmis_sayfasi)
+
+        content_layout.addWidget(self.stacked_widget, 1)
+        self.main_layout.addWidget(content_container, 1)
+
+        self.nav_list.currentRowChanged.connect(self.sayfa_degisti)
+        self.nav_list.setCurrentRow(0)
+        self.status_bar.showMessage(f"Hoş geldiniz, {self.kullanici_adi}!", 5000)
+
+    def init_menu_actions(self):
+        self.ayarlar_menu = QMenu(self)
+
+        self.kullanici_degistir_action = QAction("👤 Mevcut Kullanıcı Bilgilerini Değiştir...", self)
+        self.kullanici_degistir_action.triggered.connect(self.kullanici_degistir_dialogu_ac)
+
+        self.yeni_kullanici_action = QAction("➕ Yeni Kullanıcı Ekle...", self)
+        self.yeni_kullanici_action.triggered.connect(self.yeni_kullanici_dialogu_ac)
+
+        self.disa_aktar_action = QAction("💾 Verileri CSV Olarak Dışa Aktar...", self)
+        self.disa_aktar_action.triggered.connect(self.ana_stok_sayfasi.verileri_disa_aktar)
+
+        self.cikis_action = QAction("🚪 Çıkış Yap", self)
+        self.cikis_action.triggered.connect(self.close)
+
+        self.ayarlar_menu.addAction(self.kullanici_degistir_action)
+        self.ayarlar_menu.addAction(self.yeni_kullanici_action)
+        self.ayarlar_menu.addSeparator()
+        self.ayarlar_menu.addAction(self.disa_aktar_action)
+        self.ayarlar_menu.addSeparator()
+        self.ayarlar_menu.addAction(self.cikis_action)
+
+    def ayarlar_menu_goster(self):
+        self.ayarlar_menu.exec(self.ayarlar_btn.mapToGlobal(QPoint(0, self.ayarlar_btn.height())))
+
+    def kullanici_degistir_dialogu_ac(self):
+        dialog = KullaniciDegistirPenceresi(self.veritabani, self.kullanici_adi)
+        dialog.exec()
+
+    def yeni_kullanici_dialogu_ac(self):
+        dialog = YeniKullaniciDialog(self.veritabani, self)
+        dialog.exec()
+
+    def geri_git(self):
+        self.nav_list.setCurrentRow(self.onceki_sayfa_index)
+
+    def sayfa_degisti(self, index):
+        mevcut_index = self.stacked_widget.currentIndex()
+        if mevcut_index != index:
+            self.onceki_sayfa_index = mevcut_index
+
+        self.stacked_widget.setCurrentIndex(index)
+        self.sayfa_basligi.setText(self.nav_list.item(index).text().strip())
+
+        if index == 1:
+            self.dusuk_stok_sayfasi.stogu_guncelle()
+        elif index == 2:
+            self.gecmis_sayfasi.raporu_guncelle()
+        elif index == 0:
+            self.ana_stok_sayfasi.stogu_guncelle_arayuz()
+
+
+# =============================================================================
+# 6. LOGIN AND SETUP WINDOWS
+# =============================================================================
+
+class BaseAuthWindow(QWidget):
+    def __init__(self, title, size=(400, 300)):
+        super().__init__()
+        self.setWindowTitle(title)
+        self.setGeometry(400, 400, *size)
+        self.setObjectName("authWindow")
+
+        self.ana_layout = QVBoxLayout(self)
+        logo_layout = QVBoxLayout()
+        logo_layout.setContentsMargins(0, 10, 0, 20)
+
+        # <-- YENİ: Logo QPixmap olarak geri geldi -->
+        logo_icon = QLabel()
+        logo_icon.setObjectName("logoIcon")
+        try:
+            logo_pixmap = QPixmap("StockFlow_Logo.png")
+            if not logo_pixmap.isNull():
+                logo_icon.setPixmap(logo_pixmap.scaled(200, 150, Qt.AspectRatioMode.KeepAspectRatio,
+                                                       Qt.TransformationMode.SmoothTransformation))
+                logo_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            else:
+                raise FileNotFoundError
+        except FileNotFoundError:
+            logo_icon.setText("📦")
+            logo_icon.setStyleSheet("font-size: 48px; qproperty-alignment: AlignCenter;")
+
+        # logo_text = QLabel("StockFlow") # Logo resmi varken metne gerek yok
+        # logo_text.setObjectName("logoText")
+        # logo_text.setStyleSheet("font-size: 24px; font-weight: bold; qproperty-alignment: AlignCenter;")
+
+        logo_layout.addWidget(logo_icon)
+        # logo_layout.addWidget(logo_text)
+        self.ana_layout.addLayout(logo_layout)
+
+
+class IlkKurulumPenceresi(BaseAuthWindow):
+    kurulum_tamamlandi = pyqtSignal()
+
+    def __init__(self, veritabani_yoneticisi):
+        super().__init__("StockFlow - İlk Kurulum", (400, 350))
+        self.veritabani = veritabani_yoneticisi
+
+        duzen = QFormLayout()
+        duzen.setContentsMargins(20, 0, 20, 0)
+        duzen.setVerticalSpacing(15)
+
+        self.ana_layout.addWidget(QLabel("<h3>Yönetici Hesabı Oluştur</h3>", alignment=Qt.AlignmentFlag.AlignCenter))
+
+        self.k_adi = QLineEdit()
+        self.k_adi.setPlaceholderText("Kullanıcı Adı")
+        self.sifre = QLineEdit()
+        self.sifre.setPlaceholderText("Şifre")
+        self.sifre.setEchoMode(QLineEdit.EchoMode.Password)
+        self.sifre_t = QLineEdit()
+        self.sifre_t.setPlaceholderText("Şifre Tekrar")
+        self.sifre_t.setEchoMode(QLineEdit.EchoMode.Password)
+
+        duzen.addRow("Kullanıcı Adı:", self.k_adi)
+        duzen.addRow("Şifre:", self.sifre)
+        duzen.addRow("Şifre Tekrar:", self.sifre_t)
+
+        self.ana_layout.addLayout(duzen)
+
+        btn = QPushButton("✅ Hesabı Oluştur")
+        btn.clicked.connect(self.hesap_olustur)
+        self.ana_layout.addWidget(btn)
+        self.ana_layout.addStretch()
+
+        self.sifre_t.returnPressed.connect(self.hesap_olustur)
+
+    def hesap_olustur(self):
+        k, s, st = self.k_adi.text().strip(), self.sifre.text(), self.sifre_t.text()
+        if not k or not s: QMessageBox.warning(self, "Hata", "Alanlar boş bırakılamaz."); return
+        if s != st: QMessageBox.warning(self, "Hata", "Şifreler eşleşmiyor."); return
+        b, m = self.veritabani.kullanici_ekle(k, s)
+        if b:
+            QMessageBox.information(self, "Başarılı", "Yönetici hesabı oluşturuldu. Lütfen giriş yapın.")
+            self.kurulum_tamamlandi.emit()
+            self.close()
+        else:
+            QMessageBox.critical(self, "Hata", m)
+
+
+class GirisPenceresi(BaseAuthWindow):
+    login_basarili = pyqtSignal(str)
+    degistirme_penceresi_iste = pyqtSignal()
+    yeni_kullanici_iste = pyqtSignal()
+
+    def __init__(self, veritabani_yoneticisi):
+        super().__init__("StockFlow - Giriş Yap", (400, 380))
+        self.veritabani = veritabani_yoneticisi
+
+        duzen = QVBoxLayout()
+        duzen.setContentsMargins(20, 0, 20, 0)
+        duzen.setSpacing(5)  # Etiket ve kutu arası boşluk
+
+        self.k_adi = QLineEdit()
+        # Placeholder'a gerek kalmadı, label kullanıyoruz
+        self.sifre = QLineEdit()
+        # Placeholder'a gerek kalmadı
+        self.sifre.setEchoMode(QLineEdit.EchoMode.Password)
+
+        # Etiketleri ve input'ları dikey olarak ekle
+        duzen.addWidget(QLabel("Kullanıcı Adı:"))
+        duzen.addWidget(self.k_adi)
+
+        duzen.addSpacing(10)  # İki giriş alanı arasına boşluk
+
+        duzen.addWidget(QLabel("Şifre:"))
+        duzen.addWidget(self.sifre)
+        # --- GÜNCELLEME BİTTİ ---
+
+        self.ana_layout.addLayout(duzen)
+
+        login_btn = QPushButton("🔑 Giriş Yap")
+        login_btn.clicked.connect(self.login_kontrol)
+        self.ana_layout.addWidget(login_btn)
+
+        alt_buton_layout = QHBoxLayout()
+        alt_buton_layout.setContentsMargins(20, 10, 20, 0)
+
+        yeni_kullanici_btn = QPushButton("Hesap Oluştur")
+        yeni_kullanici_btn.setObjectName("linkButton")
+        yeni_kullanici_btn.clicked.connect(self.yeni_kullanici_iste.emit)
+
+        degistir_btn = QPushButton("Bilgileri Değiştir");
+        degistir_btn.setObjectName("linkButton")
+        degistir_btn.clicked.connect(self.degistirme_penceresi_iste.emit)
+
+        alt_buton_layout.addWidget(yeni_kullanici_btn)
+        alt_buton_layout.addStretch()
+        alt_buton_layout.addWidget(degistir_btn)
+
+        self.ana_layout.addLayout(alt_buton_layout)
+        self.ana_layout.addStretch()
+
+        self.sifre.returnPressed.connect(self.login_kontrol)
+        self.k_adi.returnPressed.connect(self.sifre.setFocus)
+
+    def login_kontrol(self):
+        k, s = self.k_adi.text(), self.sifre.text()
+        if self.veritabani.kullanici_dogrula(k, s):
+            self.login_basarili.emit(k)
+            self.close()
+        else:
+            QMessageBox.warning(self, "Hata", "Kullanıcı adı veya şifre hatalı.")
+            self.sifre.clear()
+            self.sifre.setFocus()
+
+
+class KullaniciDegistirPenceresi(BaseAuthWindow):
+    def __init__(self, veritabani_yoneticisi, mevcut_kullanici_adi=None):
+        super().__init__("Bilgileri Değiştir", (450, 480))
+        self.veritabani = veritabani_yoneticisi
+
+        duzen = QFormLayout()
+        duzen.setContentsMargins(20, 0, 20, 0)
+        duzen.setVerticalSpacing(15)
+
+        duzen.addRow(QLabel("<h3>Mevcut Bilgileri Doğrula</h3>"))
+        self.e_kadi = QLineEdit()
+        if mevcut_kullanici_adi:
+            self.e_kadi.setText(mevcut_kullanici_adi)
+            self.e_kadi.setEnabled(False)
+        else:
+            self.e_kadi.setPlaceholderText("Mevcut Kullanıcı Adı")
+
+        self.e_sifre = QLineEdit()
+        self.e_sifre.setPlaceholderText("Mevcut Şifre")
+        self.e_sifre.setEchoMode(QLineEdit.EchoMode.Password)
+        duzen.addRow("Mevcut Kullanıcı:", self.e_kadi)
+        duzen.addRow("Mevcut Şifre:", self.e_sifre)
+
+        duzen.addRow(QLabel("<h3>Yeni Bilgileri Girin</h3>"))
+        self.y_kadi = QLineEdit()
+        self.y_kadi.setPlaceholderText("Yeni Kullanıcı Adı")
+        self.y_sifre = QLineEdit()
+        self.y_sifre.setPlaceholderText("Yeni Şifre")
+        self.y_sifre.setEchoMode(QLineEdit.EchoMode.Password)
+        self.y_sifre_t = QLineEdit()
+        self.y_sifre_t.setPlaceholderText("Yeni Şifre Tekrar")
+        self.y_sifre_t.setEchoMode(QLineEdit.EchoMode.Password)
+        duzen.addRow("Yeni Kullanıcı Adı:", self.y_kadi)
+        duzen.addRow("Yeni Şifre:", self.y_sifre)
+        duzen.addRow("Yeni Şifre Tekrar:", self.y_sifre_t)
+
+        self.ana_layout.addLayout(duzen)
+
+        btn = QPushButton("✅ Değişiklikleri Onayla")
+        btn.clicked.connect(self.bilgileri_degistir)
+        self.ana_layout.addWidget(btn)
+        self.ana_layout.addStretch()
+
+        self.y_sifre_t.returnPressed.connect(self.bilgileri_degistir)
+
+    def bilgileri_degistir(self):
+        ek, es = self.e_kadi.text().strip(), self.e_sifre.text()
+        yk, ys, yst = self.y_kadi.text().strip(), self.y_sifre.text(), self.y_sifre_t.text()
+        if not all([ek, es, yk, ys]): QMessageBox.warning(self, "Hata", "Tüm alanlar doldurulmalıdır."); return
+        if ys != yst: QMessageBox.warning(self, "Hata", "Yeni şifreler eşleşmiyor."); return
+        if not self.veritabani.kullanici_dogrula(ek, es): QMessageBox.warning(self, "Hata",
+                                                                              "Mevcut bilgiler yanlış."); return
+        b, m = self.veritabani.kullanici_bilgilerini_guncelle(ek, yk, ys)
+        if b:
+            QMessageBox.information(self, "Başarılı",
+                                    m + "\nDeğişikliklerin geçerli olması için lütfen yeniden giriş yapın.");
+            self.close()
+        else:
+            QMessageBox.warning(self, "Hata", m)
+
+
+# =============================================================================
+# 7. APPLICATION CONTROLLER
+# =============================================================================
+
+class AnaKontrolcu:
+    def __init__(self):
+        self.veritabani = VeritabaniYoneticisi()
+        self.login_penceresi = self.ana_pencere = self.mevcut_pencere = None
+        self.degistirme_penceresi = None
+        self.yeni_kullanici_penceresi = None
+
+    def baslat(self):
+        if self.veritabani.kullanici_sayisi_getir() == 0:
+            self.mevcut_pencere = IlkKurulumPenceresi(self.veritabani)
+            self.mevcut_pencere.kurulum_tamamlandi.connect(self.login_penceresini_goster)
+        else:
+            self.login_penceresini_goster()
+
+        self.mevcut_pencere.show()
+
+    def login_penceresini_goster(self, _=None):  # _=None, kurulum sinyalinden gelen veriyi görmezden gelir
+        if self.mevcut_pencere and isinstance(self.mevcut_pencere, IlkKurulumPenceresi):
+            self.mevcut_pencere.close()
+
+        self.login_penceresi = GirisPenceresi(self.veritabani)
+        self.login_penceresi.login_basarili.connect(self.ana_pencereyi_goster)
+        self.login_penceresi.degistirme_penceresi_iste.connect(self.degistirme_penceresini_goster)
+        self.login_penceresi.yeni_kullanici_iste.connect(self.yeni_kullanici_penceresi_goster)
+        self.mevcut_pencere = self.login_penceresi
+        self.mevcut_pencere.show()
+
+    def ana_pencereyi_goster(self, kullanici_adi):
+        self.ana_pencere = AnaPencere(kullanici_adi, self.veritabani)
+        self.ana_pencere.show()
+
+        self.bildirim_gonder_kontrolu()
+
+        if self.mevcut_pencere: self.mevcut_pencere.close()
+
+        if self.degistirme_penceresi:
+            self.degistirme_penceresi.close()
+            self.degistirme_penceresi = None
+        if self.yeni_kullanici_penceresi:
+            self.yeni_kullanici_penceresi.close()
+            self.yeni_kullanici_penceresi = None
+
+        self.mevcut_pencere = self.login_penceresi = None
+
+    # <-- GÜNCELLENDİ: "Geri" tuşu hatasını düzeltmek için modal (.exec) kullan -->
+    def degistirme_penceresini_goster(self):
+        if self.login_penceresi and self.login_penceresi.isVisible():
+            self.login_penceresi.hide()  # Önce giriş ekranını gizle
+
+        if self.degistirme_penceresi and self.degistirme_penceresi.isVisible():
+            self.degistirme_penceresi.activateWindow()
+        else:
+            self.degistirme_penceresi = KullaniciDegistirPenceresi(self.veritabani)
+            self.degistirme_penceresi.exec()  # <-- HATA DÜZELTMESİ: .show() yerine .exec()
+
+        # Dialog kapandıktan (kullanıcı Geri veya X'e bastıktan) sonra
+        if self.login_penceresi:
+            self.login_penceresi.show()  # Giriş ekranını geri göster
+
+    # <-- GÜNCELLENDİ: "Geri" tuşu hatasını düzeltmek için modal (.exec) kullan -->
+    def yeni_kullanici_penceresi_goster(self):
+        if self.login_penceresi and self.login_penceresi.isVisible():
+            self.login_penceresi.hide()  # Önce giriş ekranını gizle
+
+        if self.yeni_kullanici_penceresi and self.yeni_kullanici_penceresi.isVisible():
+            self.yeni_kullanici_penceresi.activateWindow()
+        else:
+            self.yeni_kullanici_penceresi = YeniKullaniciDialog(self.veritabani)
+            self.yeni_kullanici_penceresi.exec()  # <-- HATA DÜZELTMESİ: .show() yerine .exec()
+
+        # Dialog kapandıktan sonra
+        if self.login_penceresi:
+            self.login_penceresi.show()  # Giriş ekranını geri göster
+
+    def bildirim_gonder_kontrolu(self):
+        if not PLYER_MUMKUN:
+            return
+        try:
+            dusuk_stok_adedi = len(self.veritabani.dusuk_stok_urunleri_getir())
+            if dusuk_stok_adedi > 0:
+                notification.notify(
+                    title='StockFlow - Düşük Stok Uyarısı',
+                    message=f'Stok seviyesi kritik olan {dusuk_stok_adedi} adet ürününüz var.',
+                    app_name='StockFlow',
+                    timeout=10
+                )
+        except Exception as e:
+            print(f"Bildirim gönderme hatası (program çalışmaya devam edecek): {e}")
+
+
+# =============================================================================
+# 8. APPLICATION STARTUP AND STYLING
+# =============================================================================
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+
+    # <-- GÜNCELLENDİ: Logo stili düzeltildi -->
+    app.setStyleSheet("""
+        /* Main Window & General */
+        * { 
+            font-family: 'Segoe UI', 'Roboto', sans-serif; 
+            color: #cbd5e1; /* slate-300 */
+        }
+        QMainWindow, QWidget#central_widget { 
+            background-color: #0f172a; /* slate-900 */
+        }
+        QDialog, QWidget#authWindow { 
+            background-color: #1e293b; /* slate-800 */
+        }
+        QMessageBox {
+            background-color: #1e293b; /* slate-800 */
+        }
+
+        /* Sidebar */
+        QFrame#sidebarFrame { 
+            background-color: #0f172a; /* slate-900 */
+            border-right: 1px solid #334155; /* slate-700 */
+        }
+        /* Sidebar bölüm başlığı (NAVİGASYON) */
+        QFrame#sidebarFrame QLabel {
+            color: #64748b; /* slate-500 */
+            font-size: 10px;
+            font-weight: bold;
+            text-transform: uppercase;
+            padding-left: 10px;
+            padding-top: 15px;
+        }
+
+        /* YENİ: Logo stilini ayarla (resim/emoji) */
+        QLabel#logoIcon { 
+            qproperty-alignment: 'AlignCenter';
+            min-height: 40px;
+            padding: 0; 
+            margin: 0;
+            text-transform: none; /* Üstteki kuralı ez */
+        }
+        QLabel#logoText { 
+            font-size: 20px; 
+            font-weight: bold; 
+            color: #f1f5f9; /* slate-100 */
+            text-transform: none; /* Üstteki kuralı ez */
+            padding: 0;
+        }
+
+        QListWidget#sidebarNav { 
+            border: none; 
+            background: transparent; 
+        }
+        QListWidget#sidebarNav::item { 
+            padding: 12px; 
+            border-radius: 8px; 
+            color: #94a3b8; /* slate-400 */
+            font-weight: 500;
+        }
+        QListWidget#sidebarNav::item:hover { 
+            background-color: #1e293b; /* slate-800 */
+            color: #f1f5f9; /* slate-100 */
+        }
+        QListWidget#sidebarNav::item:selected { 
+            background-color: #14b8a6; /* teal-500 */
+            color: #ffffff; 
+            font-weight: 600; 
+        }
+        QPushButton#sourceButton { 
+            background: #1e293b; /* slate-800 */
+            border: none; 
+            color: #64748b; /* slate-500 */
+            padding: 10px; 
+            text-align: left; 
+            border-radius: 8px; 
+            font-size: 11px; 
+            font-weight: 500;
+        }
+
+        /* Content Area */
+        QFrame#contentContainer { 
+            background: #1e293b; /* slate-800 */
+        }
+        /* Header Bar */
+        QFrame#headerBar {
+            background-color: #0f172a; /* slate-900 */
+            border-bottom: 1px solid #334155; /* slate-700 */
+        }
+        QPushButton#headerButton {
+            background: #334155; /* slate-700 */
+            color: #cbd5e1; /* slate-300 */
+            font-weight: 500;
+            padding: 8px 12px;
+        }
+        QPushButton#headerButton:hover {
+            background: #475569; /* slate-600 */
+        }
+
+        QLabel#pageTitle { 
+            font-size: 20px; 
+            font-weight: bold; 
+            color: #f1f5f9; /* slate-100 */
+            /* Header'daki başlığın text-transform'dan etkilenmemesi için */
+            text-transform: none; 
+            padding: 0;
+        }
+        QLabel#pageSubtitle { font-size: 14px; color: #94a3b8; /* slate-400 */ }
+
+        /* Metric Cards */
+        QFrame#metricCard { 
+            background-color: #0f172a; /* slate-900 */
+            border: 1px solid #334155; /* slate-700 */
+            border-radius: 12px; 
+            padding: 10px; 
+        }
+        QLabel#metricIcon { 
+            font-size: 24px; 
+            text-transform: none; /* Header kuralını ez */
+            padding: 0;
+        }
+        QLabel#metricTitle { 
+            font-size: 11px; 
+            font-weight: 500; 
+            color: #94a3b8; /* slate-400 */
+            text-transform: uppercase;
+        }
+        QLabel#metricValue { 
+            font-size: 22px; 
+            font-weight: 700; 
+            color: #f1f5f9; /* slate-100 */
+            text-transform: none;
+            padding: 0;
+        }
+        QLabel#metricValue[lowStock="true"] { color: #f87171; } /* red-400 */
+        QLabel#metricUnit { 
+            font-size: 10px; 
+            color: #94a3b8; /* slate-400 */ 
+            margin-left: 4px; 
+            text-transform: none;
+            padding: 0;
+        }
+
+        /* Action/Search Bar */
+        QFrame#searchContainer { 
+            background-color: #0f172a; /* slate-900 */
+            border: 1px solid #334155; /* slate-700 */
+            border-radius: 8px; 
+        }
+        QLineEdit#searchInput { border: none; background: transparent; padding: 8px; }
+
+        QLineEdit::clear-button {
+            background: #334155; color: #94a3b8;
+            border: none; border-radius: 6px; font-weight: 600;
+            margin: 4px 6px; height: 20px; width: 20px;
+        }
+        QLineEdit::clear-button:hover { background: #475569; }
+
+        QPushButton#filterBtn { 
+            background: #334155; /* slate-700 */
+            border: none;
+        }
+        QPushButton#filterBtn:hover { background: #475569; /* slate-600 */ }
+
+        QPushButton#filterBtn[filtered="true"] { 
+            background: #14b8a6; /* teal-500 */
+            border: none;
+        }
+        QPushButton#yeniUrunBtn { 
+            background: #16a34a; /* green-600 */
+        } 
+        QPushButton#yeniUrunBtn:hover { 
+            background: #15803d; /* green-700 */
+        }
+
+        /* Add Product Form */
+        QFrame#eklemeFormu { 
+            background: #0f172a; /* slate-900 */
+            border: 1px solid #334155; /* slate-700 */
+            border-radius: 12px; 
+            padding: 15px; 
+        }
+
+        /* Table */
+        QTableWidget#stokTablosu { 
+            background: #0f172a; /* slate-900 */
+            border: 1px solid #334155; /* slate-700 */
+            border-radius: 12px; 
+            gridline-color: #334155; /* slate-700 */
+        }
+        QTableWidget#stokTablosu::item { 
+            padding: 10px; 
+            border-bottom: 1px solid #334155; /* slate-700 */
+        }
+        QTableWidget#stokTablosu::item:selected { 
+            background-color: #0d9488; /* teal-600 */
+            color: #ffffff;
+        }
+        QHeaderView::section { 
+            background: #1e293b; /* slate-800 */
+            padding: 12px; 
+            border: none; 
+            border-bottom: 2px solid #334155; /* slate-700 */
+            font-weight: 600; 
+            color: #94a3b8; /* slate-400 */
+        }
+
+        QPushButton#menuButton { 
+            background: #334155; /* slate-700 */
+            border: none; border-radius: 6px; font-weight: bold; 
+            font-size: 14px; padding: 4px 5px; 
+        }
+        QPushButton#menuButton:hover { background: #475569; /* slate-600 */ }
+
+        /* Buttons, Inputs & Other */
+        QLineEdit, QComboBox { 
+            background-color: #0f172a; /* slate-900 */
+            border: 1px solid #334155; /* slate-700 */
+            border-radius: 8px; 
+            padding: 8px; 
+        }
+        QLineEdit:focus, QComboBox:focus { 
+            border-color: #14b8a6; /* teal-500 */
+        }
+        QComboBox::drop-down { border: none; }
+        QComboBox QAbstractItemView { 
+            background-color: #1e293b; /* slate-800 */
+            border: 1px solid #334155; /* slate-700 */
+            color: #cbd5e1; /* slate-300 */
+        }
+        QComboBox QAbstractItemView::item:selected {
+             background-color: #14b8a6; /* teal-500 */
+        }
+
+        QPushButton { 
+            background: #14b8a6; /* teal-500 */
+            color: white; 
+            border: none; 
+            border-radius: 8px; 
+            padding: 8px 16px; 
+            font-weight: 600; 
+        }
+        QPushButton:hover { 
+            background: #0d9488; /* teal-600 */
+        }
+
+        /* Link/Text Button (Giriş Ekranı) */
+        QPushButton#linkButton { 
+            background: transparent; 
+            color: #5eead4; /* teal-300 */
+            text-decoration: underline; 
+            font-weight: 500;
+            padding: 4px;
+        }
+        QPushButton#linkButton:hover {
+            color: #2dd4bf; /* teal-400 */
+        }
+
+        QMenu { 
+            background: #1e293b; /* slate-800 */
+            border: 1px solid #334155; /* slate-700 */
+            padding: 5px; 
+        }
+        QMenu::item:selected { 
+            background: #14b8a6; /* teal-500 */
+        }
+        QMenu::item#dangerAction:selected { 
+            background: #e11d48; /* rose-600 */
+        }
+
+        QStatusBar { 
+            background: #0f172a; /* slate-900 */
+            border-top: 1px solid #334155; /* slate-700 */
+            color: #64748b; /* slate-500 */
+        }
+    """)
+    kontrolcu = AnaKontrolcu()
+    kontrolcu.baslat()
+    sys.exit(app.exec())
