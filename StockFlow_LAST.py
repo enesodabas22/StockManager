@@ -2447,23 +2447,58 @@ STYLESHEET = """
     QStatusBar { background: #0f172a; border-top: 1px solid #334155; color: #64748b; padding: 4px; }
 """
 
+# ... (Mevcut kodlarınızın üst kısmı aynı kalacak)
+
+# ... (Kodunuzun üst kısımları aynı kalacak) ...
+
 if __name__ == "__main__":
-    # Global Exception Hook
+    import sys
+    import os
+    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtGui import QIcon
+
+
+    # --- GLOBAL HATA YAKALAMA (Opsiyonel ama önerilir) ---
     def exception_hook(exctype, value, traceback):
-        print(f"Global Exception: {value}")
-        msg = QMessageBox()
-        msg.setIcon(QMessageBox.Icon.Critical)
-        msg.setText("Beklenmedik bir hata oluştu.")
-        msg.setInformativeText(str(value))
-        msg.setWindowTitle("Hata")
-        msg.exec()
+        print(f"Hata: {value}")
         sys.__excepthook__(exctype, value, traceback)
 
 
     sys.excepthook = exception_hook
 
+    # 1. Uygulamayı Başlat
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLESHEET)
+
+    # 2. İşletim Sistemi Kontrolü ve İkon Yolu Belirleme
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # İkon dosyasını belirle (Önce .ico, yoksa .png dene)
+    icon_path = os.path.join(script_dir, "logo.png")
+    
+
+    # 3. WINDOWS'A ÖZEL AYAR (Sadece Windows ise çalışır)
+    # os.name 'nt' ise Windows demektir.
+    if os.name == 'nt':
+        import ctypes
+
+        myappid = 'stockflow.stok.yonetimi.v1.0'  # Benzersiz kimlik
+        try:
+            # Bu satır Windows'ta görev çubuğu ikonunu düzeltir
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        except Exception:
+            pass
+
+    # 4. İKONU UYGULAMA (Tüm Sistemler İçin Ortak)
+    if os.path.exists(icon_path):
+        app_icon = QIcon(icon_path)
+        app.setWindowIcon(app_icon)
+
+        # macOS'ta Dock ikonunu değiştirmek için bazen ek işlem gerekebilir
+        # ancak setWindowIcon genellikle pencere başlığı için yeterlidir.
+
+    # 5. Ana Pencereyi Başlat
     kontrolcu = AnaKontrolcu()
     kontrolcu.baslat()
+
     sys.exit(app.exec())
