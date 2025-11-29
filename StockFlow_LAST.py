@@ -9,6 +9,7 @@ from datetime import datetime, date
 # --- ÜÇÜNCÜ PARTİ KÜTÜPHANELER ---
 try:
     from plyer import notification
+
     PLYER_MUMKUN = True
 except ImportError:
     PLYER_MUMKUN = False
@@ -17,6 +18,7 @@ except ImportError:
 try:
     import firebase_admin
     from firebase_admin import credentials, db
+
     FIREBASE_MUMKUN = True
 except ImportError:
     FIREBASE_MUMKUN = False
@@ -31,7 +33,8 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QStatusBar, QInputDialog, QComboBox,
     QProgressBar, QDateEdit
 )
-from PyQt6.QtGui import QAction, QFont, QColor, QCursor, QPixmap, QDoubleValidator, QPainter, QPen, QBrush, QLinearGradient
+from PyQt6.QtGui import QAction, QFont, QColor, QCursor, QPixmap, QDoubleValidator, QPainter, QPen, QBrush, \
+    QLinearGradient
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QDate, QRectF, QSize
 
 # --- YAPILANDIRMA ---
@@ -357,7 +360,7 @@ class VeritabaniYoneticisi:
             urun_cesidi = self.cursor.execute("SELECT COUNT(id) FROM urunler").fetchone()[0]
             toplam_stok_degeri = self.cursor.execute("SELECT SUM(fiyat * miktar) FROM urunler").fetchone()[0]
             dusuk_stok_sayisi = \
-            self.cursor.execute("SELECT COUNT(id) FROM urunler WHERE miktar <= min_stok").fetchone()[0]
+                self.cursor.execute("SELECT COUNT(id) FROM urunler WHERE miktar <= min_stok").fetchone()[0]
             return {"urun_cesidi": urun_cesidi or 0, "toplam_deger": toplam_stok_degeri or 0.0,
                     "dusuk_stok": dusuk_stok_sayisi or 0}
         except Exception:
@@ -1541,7 +1544,7 @@ class AnaStokSayfasi(QWidget):
             kategori = self.stok_tablosu.item(i, 3).text().lower()
             fiyat_text = self.stok_tablosu.item(i, 4).text().lower()
             text_match = (
-                        metin_lower in urun_kodu or metin_lower in urun_adi or metin_lower in kategori or metin_lower in fiyat_text)
+                    metin_lower in urun_kodu or metin_lower in urun_adi or metin_lower in kategori or metin_lower in fiyat_text)
             fiyat = self.stok_tablosu.item(i, 4).sort_key
             miktar = self.stok_tablosu.item(i, 5).sort_key
             min_stok_val = self.stok_tablosu.item(i, 7).sort_key
@@ -1648,10 +1651,11 @@ class SimpleChartWidget(QWidget):
     Basit grafikler çizen özel widget.
     Matplotlib bağımlılığı olmadan çalışır.
     """
+
     def __init__(self, chart_type="line", data=None, title="", parent=None):
         super().__init__(parent)
         self.chart_type = chart_type
-        self.data = data if data else {} # {label: value} or {x_label: y_value}
+        self.data = data if data else {}  # {label: value} or {x_label: y_value}
         self.title = title
         self.setMinimumHeight(250)
         self.setStyleSheet("background-color: transparent;")
@@ -1660,14 +1664,15 @@ class SimpleChartWidget(QWidget):
         try:
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            
+
             # Arka plan
             # painter.fillRect(self.rect(), QColor("#1e293b")) # Parent rengini kullan
 
             # Başlık
             painter.setPen(QColor("#94a3b8"))
             painter.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-            painter.drawText(self.rect().adjusted(10, 10, -10, -10), Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft, self.title)
+            painter.drawText(self.rect().adjusted(10, 10, -10, -10),
+                             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft, self.title)
 
             if not self.data:
                 painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Veri Yok")
@@ -1675,12 +1680,12 @@ class SimpleChartWidget(QWidget):
 
             # Çizim alanı
             margin_left = 40
-            margin_bottom = 50 # Label truncation fix
+            margin_bottom = 50  # Label truncation fix
             margin_top = 40
             margin_right = 20
-            
+
             chart_rect = self.rect().adjusted(margin_left, margin_top, -margin_right, -margin_bottom)
-            
+
             if self.chart_type == "line":
                 self.draw_line_chart(painter, chart_rect)
             elif self.chart_type == "bar":
@@ -1689,35 +1694,34 @@ class SimpleChartWidget(QWidget):
             print(f"Paint Error: {e}")
             # Hata durumunda boş geç, çökme
 
-
     def draw_line_chart(self, painter, rect):
         # Eksenler
         painter.setPen(QPen(QColor("#334155"), 2))
-        painter.drawLine(int(rect.left()), int(rect.bottom()), int(rect.right()), int(rect.bottom())) # X
-        painter.drawLine(int(rect.left()), int(rect.top()), int(rect.left()), int(rect.bottom())) # Y
+        painter.drawLine(int(rect.left()), int(rect.bottom()), int(rect.right()), int(rect.bottom()))  # X
+        painter.drawLine(int(rect.left()), int(rect.top()), int(rect.left()), int(rect.bottom()))  # Y
 
         values = list(self.data.values())
         keys = list(self.data.keys())
-        
+
         if not values: return
-        
+
         max_val = max(values) if max(values) > 0 else 10
         min_val = 0
-        
+
         # Noktalar
         points = []
         step_x = rect.width() / (len(values) - 1) if len(values) > 1 else rect.width()
-        
+
         for i, val in enumerate(values):
             x = rect.left() + (i * step_x)
             # Y ekseni ters (0 üstte)
             ratio = (val - min_val) / (max_val - min_val)
             y = rect.bottom() - (ratio * rect.height())
             points.append(QPoint(int(x), int(y)))
-            
+
             # X ekseni etiketleri (sadece bazıları)
             if len(values) > 10 and i % 3 != 0: continue
-            
+
             painter.setPen(QColor("#64748b"))
             painter.setFont(QFont("Segoe UI", 8))
             painter.drawText(int(x) - 15, int(rect.bottom()) + 5, 30, 20, Qt.AlignmentFlag.AlignCenter, str(keys[i]))
@@ -1725,44 +1729,45 @@ class SimpleChartWidget(QWidget):
         # Çizgi
         painter.setPen(QPen(QColor("#3b82f6"), 3))
         for i in range(len(points) - 1):
-            painter.drawLine(points[i], points[i+1])
-            
+            painter.drawLine(points[i], points[i + 1])
+
         # Altını doldur (Gradient)
         path_brush = QLinearGradient(rect.topLeft(), rect.bottomLeft())
         path_brush.setColorAt(0, QColor(59, 130, 246, 100))
         path_brush.setColorAt(1, QColor(59, 130, 246, 0))
-        
+
         # Polygon oluşturma (basit dolgu için)
         # Karmaşık polygon işlemleri yerine sadece çizgiyi bırakıyorum şimdilik, temiz görünsün.
 
     def draw_bar_chart(self, painter, rect):
         values = list(self.data.values())
         keys = list(self.data.keys())
-        
+
         if not values: return
-        
+
         max_val = max(values) if max(values) > 0 else 10
         count = len(values)
         bar_width = (rect.width() / count) * 0.6
         spacing = (rect.width() / count) * 0.4
-        
+
         start_x = rect.left() + (spacing / 2)
-        
+
         for i, val in enumerate(values):
             ratio = val / max_val
             bar_height = rect.height() * ratio
             x = start_x + (i * (bar_width + spacing))
             y = rect.bottom() - bar_height
-            
+
             bar_rect = QRectF(x, y, bar_width, bar_height)
-            
+
             painter.setBrush(QBrush(QColor("#10b981")))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawRoundedRect(bar_rect, 4, 4)
-            
+
             # Etiket
             painter.setPen(QColor("#cbd5e1"))
-            painter.drawText(QRectF(x - 5, rect.bottom() + 5, bar_width + 10, 20), Qt.AlignmentFlag.AlignCenter, str(keys[i][:5]))
+            painter.drawText(QRectF(x - 5, rect.bottom() + 5, bar_width + 10, 20), Qt.AlignmentFlag.AlignCenter,
+                             str(keys[i][:5]))
 
 
 class DashboardPage(QWidget):
@@ -1780,11 +1785,11 @@ class DashboardPage(QWidget):
         # --- Üst Kartlar ---
         cards_layout = QHBoxLayout()
         cards_layout.setSpacing(20)
-        
+
         self.card_total_stock = self.create_info_card("TOPLAM STOK DEĞERİ", "0.00₺", "#3b82f6")
         self.card_low_stock = self.create_info_card("KRİTİK STOK", "0", "#ef4444")
         self.card_monthly_sales = self.create_info_card("BU AY SATIŞ", "0.00₺", "#10b981")
-        
+
         cards_layout.addWidget(self.card_total_stock)
         cards_layout.addWidget(self.card_low_stock)
         cards_layout.addWidget(self.card_monthly_sales)
@@ -1792,19 +1797,19 @@ class DashboardPage(QWidget):
 
         # --- Grafikler ---
         charts_layout = QHBoxLayout()
-        
+
         # Sol Grafik: Satış Trendi (Son 7 Gün)
         self.sales_chart = SimpleChartWidget("line", title="Son 7 Günlük Satış Trendi")
         self.sales_chart_frame = self.wrap_chart(self.sales_chart)
         charts_layout.addWidget(self.sales_chart_frame, 2)
-        
+
         # Sağ Grafik: Kategori Dağılımı (En çok stok tutan 5 kategori)
         self.category_chart = SimpleChartWidget("bar", title="Stok Dağılımı (Adet)")
         self.category_chart_frame = self.wrap_chart(self.category_chart)
         charts_layout.addWidget(self.category_chart_frame, 1)
-        
+
         layout.addLayout(charts_layout, 1)
-        
+
         # --- Alt Bilgi ---
         refresh_btn = QPushButton("Verileri Yenile")
         refresh_btn.setFixedWidth(150)
@@ -1822,13 +1827,14 @@ class DashboardPage(QWidget):
         val_lbl.setObjectName("metricValue")
         l.addWidget(title_lbl)
         l.addWidget(val_lbl)
-        frame.val_lbl = val_lbl # Referans tut
+        frame.val_lbl = val_lbl  # Referans tut
         return frame
 
     def wrap_chart(self, chart_widget):
         frame = QFrame()
         frame.setObjectName("chartCard")
-        frame.setStyleSheet("QFrame#chartCard { background-color: #1e293b; border-radius: 12px; border: 1px solid #334155; }")
+        frame.setStyleSheet(
+            "QFrame#chartCard { background-color: #1e293b; border-radius: 12px; border: 1px solid #334155; }")
         l = QVBoxLayout(frame)
         l.addWidget(chart_widget)
         return frame
@@ -1839,10 +1845,10 @@ class DashboardPage(QWidget):
             genel = self.veritabani.genel_bakis_getir()
             self.card_total_stock.val_lbl.setText(f"{genel['toplam_deger']:,.2f}₺")
             self.card_low_stock.val_lbl.setText(str(genel['dusuk_stok']))
-            
+
             # Aylık Satış
             rapor = self.veritabani.kar_zarar_raporu_getir('aylik')
-            aylik_ciro = sum([r[6] for r in rapor]) if rapor else 0.0 # 6. index toplam ciro
+            aylik_ciro = sum([r[6] for r in rapor]) if rapor else 0.0  # 6. index toplam ciro
             self.card_monthly_sales.val_lbl.setText(f"{aylik_ciro:,.2f}₺")
 
             # 2. Grafik Verileri
@@ -1862,12 +1868,13 @@ class DashboardPage(QWidget):
                 res = row[0] if row else 0.0
                 sales.append(res if res else 0.0)
                 dates.append(d.toString("dd MMM"))
-            
+
             self.sales_chart.data = dict(zip(dates, sales))
             self.sales_chart.update()
-            
+
             # Kategori Dağılımı
-            cursor.execute("SELECT kategori, SUM(miktar) FROM urunler GROUP BY kategori ORDER BY SUM(miktar) DESC LIMIT 5")
+            cursor.execute(
+                "SELECT kategori, SUM(miktar) FROM urunler GROUP BY kategori ORDER BY SUM(miktar) DESC LIMIT 5")
             cats = cursor.fetchall()
             cat_data = {}
             if cats:
@@ -1875,10 +1882,10 @@ class DashboardPage(QWidget):
                     cat_name = c[0] if c[0] else "Diğer"
                     cat_qty = c[1] if c[1] else 0
                     cat_data[cat_name] = cat_qty
-            
+
             self.category_chart.data = cat_data
             self.category_chart.update()
-            
+
         except Exception as e:
             print(f"Dashboard refresh error: {e}")
             # Hata olsa bile uygulamanın çökmemesi için sessizce devam et veya logla
@@ -1913,6 +1920,8 @@ class AnaPencere(QMainWindow):
         self.sidebar.setFixedWidth(256)
         sidebar_layout = QVBoxLayout(self.sidebar)
         sidebar_layout.setContentsMargins(12, 12, 12, 12)
+
+        # --- Logo Kısmı ---
         logo_icon = QLabel()
         logo_icon.setObjectName("logoIcon")
         try:
@@ -1926,29 +1935,54 @@ class AnaPencere(QMainWindow):
         except FileNotFoundError:
             logo_icon.setText("📦")
             logo_icon.setStyleSheet("font-size: 24px; padding: 0; margin: 0;")
+
         logo_layout = QHBoxLayout()
         logo_layout.addWidget(logo_icon)
         logo_layout.addStretch()
+
+        # --- Navigasyon Listesi (Değişiklik Burada) ---
         self.nav_list = QListWidget()
         self.nav_list.setObjectName("sidebarNav")
-        self.nav_list = QListWidget()
-        self.nav_list.setObjectName("sidebarNav")
+
+        # Öğeleri ekle
         self.nav_list.addItem(QListWidgetItem("Genel Bakış (Dashboard)"))
         self.nav_list.addItem(QListWidgetItem("Ana Stok Listesi"))
         self.nav_list.addItem(QListWidgetItem("Düşük Stok Uyarıları"))
         self.nav_list.addItem(QListWidgetItem("Stok Hareketleri"))
         self.nav_list.addItem(QListWidgetItem("En Çok Satanlar"))
         self.nav_list.addItem(QListWidgetItem("Satışlar"))
+
+        # --- YENİ EKLENEN AYARLAR ---
+        # 1. Dikey kaydırma çubuğunu tamamen kapatıyoruz
+        self.nav_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # 2. Yatay kaydırma çubuğunu kapatıyoruz
+        self.nav_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # 3. Listenin tüm öğeleri alacak kadar yüksek olmasını sağlıyoruz (Piksell cinsinden)
+        # 6 öğe var, CSS paddingleri ile yaklaşık 350-400px yeterli olacaktır.
+        self.nav_list.setMinimumHeight(400)
+        # 4. Seçim yapıldığında mavi çerçevenin çıkmasını engellemek için (görsel iyileştirme)
+        self.nav_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        # ----------------------------
+
         source_button = QPushButton(f"Kullanıcı: {self.kullanici_adi}")
         source_button.setObjectName("sourceButton")
         source_button.setEnabled(False)
+
         sidebar_layout.addLayout(logo_layout)
         sidebar_layout.addWidget(QLabel("NAVİGASYON"), 0, Qt.AlignmentFlag.AlignLeft)
+
+        # Listeyi ekle
         sidebar_layout.addWidget(self.nav_list)
+
+        # Listenin altına boşluk ekleyerek butonu en alta itiyoruz
         sidebar_layout.addStretch()
         sidebar_layout.addWidget(source_button)
+
         self.main_layout.addWidget(self.sidebar)
+
+        # --- Buradan sonrası aynı (Header ve Content) ---
         content_container = QFrame()
+        # ... (kodun geri kalanı aynı) ...
         content_container.setObjectName("contentContainer")
         content_layout = QVBoxLayout(content_container)
         content_layout.setContentsMargins(0, 0, 0, 0)
@@ -1976,7 +2010,7 @@ class AnaPencere(QMainWindow):
         self.stacked_widget = QStackedWidget()
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        
+
         # Sayfalar
         self.dashboard_sayfasi = DashboardPage(self.veritabani)
         self.ana_stok_sayfasi = AnaStokSayfasi(self.veritabani, self.status_bar, self.kullanici_adi)
@@ -1984,14 +2018,14 @@ class AnaPencere(QMainWindow):
         self.gecmis_sayfasi = StokHareketSayfasi(self.veritabani, self.kullanici_adi)
         self.satis_raporu_sayfasi = SatisRaporuSayfasi(self.veritabani)
         self.kar_zarar_sayfasi = KarZararSayfasi(self.veritabani)
-        
-        self.stacked_widget.addWidget(self.dashboard_sayfasi) # Index 0
-        self.stacked_widget.addWidget(self.ana_stok_sayfasi) # Index 1
-        self.stacked_widget.addWidget(self.dusuk_stok_sayfasi) # Index 2
-        self.stacked_widget.addWidget(self.gecmis_sayfasi) # Index 3
-        self.stacked_widget.addWidget(self.satis_raporu_sayfasi) # Index 4
-        self.stacked_widget.addWidget(self.kar_zarar_sayfasi) # Index 5
-        
+
+        self.stacked_widget.addWidget(self.dashboard_sayfasi)  # Index 0
+        self.stacked_widget.addWidget(self.ana_stok_sayfasi)  # Index 1
+        self.stacked_widget.addWidget(self.dusuk_stok_sayfasi)  # Index 2
+        self.stacked_widget.addWidget(self.gecmis_sayfasi)  # Index 3
+        self.stacked_widget.addWidget(self.satis_raporu_sayfasi)  # Index 4
+        self.stacked_widget.addWidget(self.kar_zarar_sayfasi)  # Index 5
+
         content_layout.addWidget(self.stacked_widget, 1)
         self.main_layout.addWidget(content_container, 1)
         self.nav_list.currentRowChanged.connect(self.sayfa_degisti)
@@ -2000,6 +2034,7 @@ class AnaPencere(QMainWindow):
 
     def init_menu_actions(self):
         self.ayarlar_menu = QMenu(self)
+
     def init_menu_actions(self):
         self.ayarlar_menu = QMenu(self)
         self.kullanici_degistir_action = QAction("Mevcut Kullanıcı Bilgilerini Değiştir...", self)
@@ -2326,44 +2361,44 @@ class AnaKontrolcu:
 STYLESHEET = """
     /* Global Reset & Fonts */
     * { font-family: 'Segoe UI', 'Roboto', sans-serif; color: #e2e8f0; selection-background-color: #3b82f6; selection-color: #ffffff; }
-    
+
     /* Main Backgrounds */
     QMainWindow, QWidget#central_widget { background-color: #0f172a; }
     QDialog, QWidget#authWindow { background-color: #1e293b; border: 1px solid #334155; border-radius: 8px; }
     QMessageBox { background-color: #1e293b; color: #e2e8f0; }
-    
+
     /* Sidebar */
     QFrame#sidebarFrame { background-color: #1e293b; border-right: 1px solid #334155; }
     QFrame#sidebarFrame QLabel { color: #94a3b8; font-size: 11px; font-weight: 700; text-transform: uppercase; padding-left: 12px; padding-top: 20px; letter-spacing: 0.5px; }
     QLabel#logoIcon { qproperty-alignment: 'AlignCenter'; min-height: 50px; padding: 10px; margin: 0; }
     QLabel#logoText { font-size: 22px; font-weight: 800; color: #f8fafc; padding: 0; letter-spacing: 0.5px; }
-    
+
     /* Navigation List */
     QListWidget#sidebarNav { border: none; background: transparent; outline: none; margin-top: 10px; }
     QListWidget#sidebarNav::item { padding: 12px 16px; border-radius: 8px; color: #cbd5e1; font-weight: 500; margin: 4px 12px; transition: all 0.2s; }
     QListWidget#sidebarNav::item:hover { background-color: #334155; color: #f1f5f9; }
     QListWidget#sidebarNav::item:selected { background-color: #2563eb; color: #ffffff; font-weight: 600; border-left: 4px solid #60a5fa; }
-    
+
     /* Buttons */
     QPushButton { background-color: #3b82f6; color: white; border: none; border-radius: 6px; padding: 8px 16px; font-weight: 600; font-size: 13px; }
     QPushButton:hover { background-color: #2563eb; }
     QPushButton:pressed { background-color: #1d4ed8; }
     QPushButton:disabled { background-color: #475569; color: #94a3b8; }
-    
+
     QPushButton#sourceButton { background: #0f172a; border: 1px solid #334155; color: #94a3b8; padding: 12px; text-align: left; border-radius: 8px; font-size: 12px; font-weight: 500; margin: 10px; }
     QPushButton#headerButton { background: transparent; border: 1px solid #334155; color: #cbd5e1; font-weight: 500; padding: 6px 12px; }
     QPushButton#headerButton:hover { background: #334155; color: white; border-color: #475569; }
-    
+
     QPushButton#filterBtn { background: #1e293b; border: 1px solid #334155; color: #cbd5e1; }
     QPushButton#filterBtn:hover { background: #334155; border-color: #475569; }
     QPushButton#filterBtn[filtered="true"] { background: #3b82f6; color: white; border: none; }
-    
+
     QPushButton#yeniUrunBtn { background: #10b981; }
     QPushButton#yeniUrunBtn:hover { background: #059669; }
-    
+
     QPushButton#menuButton { background: transparent; border: 1px solid transparent; border-radius: 4px; font-weight: 900; font-size: 18px; color: #94a3b8; padding: 0px 8px; margin: 0; line-height: 10px; }
     QPushButton#menuButton:hover { background: #334155; color: white; border-color: #475569; }
-    
+
     QPushButton#linkButton { background: transparent; color: #60a5fa; text-decoration: none; font-weight: 500; padding: 4px; }
     QPushButton#linkButton:hover { color: #93c5fd; text-decoration: underline; }
 
@@ -2372,7 +2407,7 @@ STYLESHEET = """
     QFrame#headerBar { background-color: #0f172a; border-bottom: 1px solid #1e293b; }
     QLabel#pageTitle { font-size: 24px; font-weight: 700; color: #f1f5f9; padding: 0; }
     QLabel#pageSubtitle { font-size: 14px; color: #94a3b8; }
-    
+
     /* Cards */
     QFrame#metricCard { background-color: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 20px; }
     QFrame#metricCard:hover { border-color: #475569; background-color: #252f45; }
@@ -2380,34 +2415,34 @@ STYLESHEET = """
     QLabel#metricValue { font-size: 28px; font-weight: 700; color: #f1f5f9; padding: 4px 0; }
     QLabel#metricValue[lowStock="true"] { color: #ef4444; }
     QLabel#metricUnit { font-size: 12px; color: #64748b; margin-left: 4px; padding-bottom: 4px; }
-    
+
     /* Search & Inputs */
     QFrame#searchContainer { background-color: #1e293b; border: 1px solid #334155; border-radius: 8px; }
     QLineEdit#searchInput { border: none; background: transparent; padding: 10px; font-size: 14px; color: #f1f5f9; }
-    
+
     QLineEdit, QComboBox, QDateEdit { background-color: #1e293b; border: 1px solid #334155; border-radius: 6px; padding: 8px; color: #f1f5f9; font-size: 13px; }
     QLineEdit:focus, QComboBox:focus, QDateEdit:focus { border-color: #3b82f6; background-color: #252f45; }
     QLineEdit::placeholder { color: #64748b; }
-    
+
     /* Tables */
     QTableWidget { background-color: #1e293b; border: 1px solid #334155; border-radius: 8px; gridline-color: #334155; outline: none; }
     QTableWidget::item { padding: 12px 8px; border-bottom: 1px solid #334155; color: #e2e8f0; }
     QTableWidget::item:selected { background-color: #3b82f6; color: #ffffff; }
     QHeaderView::section { background-color: #0f172a; padding: 12px 10px; border: none; border-bottom: 2px solid #334155; font-weight: 600; color: #94a3b8; text-transform: uppercase; font-size: 12px; }
     QTableWidget QTableCornerButton::section { background-color: #0f172a; border: none; }
-    
+
     /* Menus */
     QMenu { background: #1e293b; border: 1px solid #334155; padding: 4px; border-radius: 6px; }
     QMenu::item { padding: 6px 24px 6px 12px; border-radius: 4px; color: #e2e8f0; }
     QMenu::item:selected { background: #3b82f6; color: white; }
     QMenu::separator { height: 1px; background: #334155; margin: 4px 0; }
-    
+
     /* Scrollbars */
     QScrollBar:vertical { border: none; background: #0f172a; width: 10px; margin: 0; }
     QScrollBar::handle:vertical { background: #334155; min-height: 20px; border-radius: 5px; }
     QScrollBar::handle:vertical:hover { background: #475569; }
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
-    
+
     /* Status Bar */
     QStatusBar { background: #0f172a; border-top: 1px solid #334155; color: #64748b; padding: 4px; }
 """
@@ -2423,6 +2458,7 @@ if __name__ == "__main__":
         msg.setWindowTitle("Hata")
         msg.exec()
         sys.__excepthook__(exctype, value, traceback)
+
 
     sys.excepthook = exception_hook
 
