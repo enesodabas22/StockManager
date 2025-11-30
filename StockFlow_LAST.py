@@ -85,6 +85,11 @@ class VeritabaniYoneticisi:
             self.cursor.execute("PRAGMA table_info(urunler)")
             mevcut_sutunlar = [row[1] for row in self.cursor.fetchall()]
 
+            # --- YENİ EKLENEN KISIM: 'aktif' sütunu ---
+            if 'aktif' not in mevcut_sutunlar:
+                self.cursor.execute("ALTER TABLE urunler ADD COLUMN aktif INTEGER DEFAULT 1")
+            # ------------------------------------------
+
             if 'urun_kodu' not in mevcut_sutunlar:
                 self.cursor.execute("ALTER TABLE urunler ADD COLUMN urun_kodu TEXT")
                 try:
@@ -105,27 +110,6 @@ class VeritabaniYoneticisi:
             hareket_sutunlari = [row[1] for row in self.cursor.fetchall()]
             if 'satis_fiyati' not in hareket_sutunlari:
                 self.cursor.execute("ALTER TABLE stok_hareketleri ADD COLUMN satis_fiyati REAL")
-
-            # Tip düzeltmeleri (Integer -> Real dönüşümü gerekirse)
-            if self._sutun_tipi_getir('urunler', 'miktar') == 'INTEGER':
-                self.cursor.execute("ALTER TABLE urunler RENAME TO urunler_eski")
-                self.tablolari_olustur()
-                self.cursor.execute("""
-                    INSERT INTO urunler (id, urun_kodu, ad, kategori, fiyat, miktar, min_stok, birim, baslangic_miktari, son_kullanma_tarihi)
-                    SELECT id, urun_kodu, ad, kategori, fiyat, CAST(miktar AS REAL), CAST(min_stok AS REAL), 'adet', CAST(miktar AS REAL), NULL
-                    FROM urunler_eski
-                """)
-                self.cursor.execute("DROP TABLE urunler_eski")
-
-            if self._sutun_tipi_getir('stok_hareketleri', 'miktar_degisimi') == 'INTEGER':
-                self.cursor.execute("ALTER TABLE stok_hareketleri RENAME TO stok_hareketleri_eski")
-                self.tablolari_olustur()
-                self.cursor.execute("""
-                    INSERT INTO stok_hareketleri (id, urun_id, kullanici_adi, islem_tipi, miktar_degisimi, yeni_miktar, tarih, notlar)
-                    SELECT id, urun_id, kullanici_adi, islem_tipi, CAST(miktar_degisimi AS REAL), CAST(yeni_miktar AS REAL), tarih, notlar
-                    FROM stok_hareketleri_eski
-                """)
-                self.cursor.execute("DROP TABLE stok_hareketleri_eski")
 
             self.baglanti.commit()
         except sqlite3.OperationalError:
@@ -178,8 +162,9 @@ class VeritabaniYoneticisi:
             print(f"Stok hareketi kaydedilemedi: {e}")
 
     def urunleri_getir(self):
+        # Sadece aktif=1 olanları getiriyoruz
         self.cursor.execute(
-            "SELECT id, urun_kodu, ad, kategori, fiyat, miktar, birim, min_stok, baslangic_miktari, son_kullanma_tarihi FROM urunler ORDER BY ad ASC")
+            "SELECT id, urun_kodu, ad, kategori, fiyat, miktar, birim, min_stok, baslangic_miktari, son_kullanma_tarihi FROM urunler WHERE aktif = 1 ORDER BY ad ASC")
         return self.cursor.fetchall()
 
     def dusuk_stok_urunleri_getir(self):
@@ -243,12 +228,29 @@ class VeritabaniYoneticisi:
         self.cursor.execute("SELECT miktar, baslangic_miktari FROM urunler WHERE id = ?", (urun_id,))
         sonuc = self.cursor.fetchone()
         if not sonuc: return False, "Ürün bulunamadı."
+
         mevcut_miktar, mevcut_baslangic = sonuc
         yeni_miktar = mevcut_miktar + miktar_farki
+
         if yeni_miktar < 0: return False, "Stok eksiye düşemez."
+
+        # --- GÜNCELLENEN KISIM: Soft Delete (Pasife Çekme) ---
+        if yeni_miktar == 0:
+            islem_tipi = "STOK ÇIKIŞI" if miktar_farki < 0 else "STOK GÜNCELLEME"
+            # Notlara "OTOMATİK SİLİNDİ" yazıyoruz ki geri alırken anlayabilelim
+            self._stok_hareketi_kaydet(urun_id, kullanici_adi, islem_tipi, miktar_farki, 0,
+                                       "Stok bitti, ürün arşivlendi (Pasif).", satis_fiyati)
+
+            # DELETE yerine UPDATE kullanıyoruz
+            self.cursor.execute("UPDATE urunler SET miktar = 0, aktif = 0 WHERE id = ?", (urun_id,))
+            self.baglanti.commit()
+            return True, "Ürün tükendiği için listeden kaldırıldı (Geçmişte görünür)."
+        # -----------------------------------------------------
+
         yeni_baslangic = max(mevcut_baslangic, yeni_miktar)
-        self.cursor.execute("UPDATE urunler SET miktar = ?, baslangic_miktari = ? WHERE id = ?",
+        self.cursor.execute("UPDATE urunler SET miktar = ?, baslangic_miktari = ?, aktif = 1 WHERE id = ?",
                             (yeni_miktar, yeni_baslangic, urun_id))
+
         islem_tipi = "STOK EKLEME" if miktar_farki > 0 else "STOK ÇIKIŞI"
         self._stok_hareketi_kaydet(urun_id, kullanici_adi, islem_tipi, miktar_farki, yeni_miktar, "Manuel işlem",
                                    satis_fiyati)
@@ -257,8 +259,9 @@ class VeritabaniYoneticisi:
 
     def urun_sil(self, urun_id, kullanici_adi):
         mevcut_miktar = self.mevcut_miktar_getir(urun_id)
-        self._stok_hareketi_kaydet(urun_id, kullanici_adi, "ÜRÜN SİLME", -mevcut_miktar, 0, "Ürün sistemden silindi")
-        self.cursor.execute("DELETE FROM urunler WHERE id = ?", (urun_id,))
+        self._stok_hareketi_kaydet(urun_id, kullanici_adi, "ÜRÜN SİLME", -mevcut_miktar, 0, "Kullanıcı sildi (Pasif)")
+        # Tamamen silmek yerine pasife çekiyoruz
+        self.cursor.execute("UPDATE urunler SET aktif = 0, miktar = 0 WHERE id = ?", (urun_id,))
         self.baglanti.commit()
 
     def mevcut_miktar_getir(self, urun_id):
@@ -300,20 +303,29 @@ class VeritabaniYoneticisi:
                             (hareket_id,))
         hareket = self.cursor.fetchone()
         if not hareket: return False, "İşlem bulunamadı."
+
         urun_id, miktar_degisimi, islem_tipi = hareket
+
+        # Ürünü bulurken aktif/pasif fark etmeksizin buluyoruz
         self.cursor.execute("SELECT miktar FROM urunler WHERE id = ?", (urun_id,))
         urun = self.cursor.fetchone()
-        if not urun: return False, "Bu ürün silinmiş, işlem geri alınamaz."
+
+        if not urun: return False, "Ürün veritabanından tamamen silinmiş (Geri alınamaz)."
+
         mevcut_stok = urun[0]
         ters_degisim = -1 * miktar_degisimi
         yeni_miktar = mevcut_stok + ters_degisim
+
         if yeni_miktar < 0: return False, "Geri alma işlemi stok miktarını eksiye düşüreceği için yapılamaz."
+
         try:
-            self.cursor.execute("UPDATE urunler SET miktar = ? WHERE id = ?", (yeni_miktar, urun_id))
+            # Geri alırken aktif = 1 yaparak ürünü tekrar listeye sokuyoruz
+            self.cursor.execute("UPDATE urunler SET miktar = ?, aktif = 1 WHERE id = ?", (yeni_miktar, urun_id))
+
             notlar = f"İşlem ID: {hareket_id} geri alındı."
             self._stok_hareketi_kaydet(urun_id, aktif_kullanici, "İŞLEM GERİ ALMA", ters_degisim, yeni_miktar, notlar)
             self.baglanti.commit()
-            return True, "İşlem başarıyla geri alındı."
+            return True, "İşlem geri alındı ve ürün tekrar listeye eklendi."
         except Exception as e:
             self.baglanti.rollback()
             return False, f"Hata: {e}"
@@ -405,7 +417,7 @@ class VeritabaniYoneticisi:
 # =============================================================================
 
 class FirebaseYedekleyici(QDialog):
-    """Firebase Realtime Database ile veri senkronizasyonu sağlar."""
+    """Firebase Realtime Database ile veri senkronizasyonu (Ürünler + Geçmiş)."""
 
     def __init__(self, veritabani_yoneticisi, parent=None):
         super().__init__(parent)
@@ -425,13 +437,12 @@ class FirebaseYedekleyici(QDialog):
                 QLabel("HATA: 'firebase-admin' yüklü değil.\n'pip install firebase-admin' komutunu çalıştırın."))
             return
 
-        # Logo veya Başlık
-        baslik = QLabel("Firebase Realtime Database")
+        baslik = QLabel("Firebase Veri Yedekleme")
         baslik.setStyleSheet("font-size: 16px; font-weight: bold; color: #ffa000;")
         baslik.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(baslik)
 
-        info = QLabel("Verilerinizi anlık olarak bulutta saklayın ve her yerden erişin.")
+        info = QLabel("Ürünlerinizi VE satış geçmişinizi bulutla eşitleyin.")
         info.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(info)
 
@@ -445,10 +456,10 @@ class FirebaseYedekleyici(QDialog):
         layout.addWidget(self.status_lbl)
 
         btn_layout = QHBoxLayout()
-        self.btn_gonder = QPushButton("Buluta Yükle")
+        self.btn_gonder = QPushButton("Buluta Yükle (Yedekle)")
         self.btn_gonder.clicked.connect(self.buluta_gonder)
 
-        self.btn_cek = QPushButton("Buluttan İndir")
+        self.btn_cek = QPushButton("Buluttan İndir (Geri Yükle)")
         self.btn_cek.clicked.connect(self.buluttan_cek)
 
         btn_layout.addWidget(self.btn_gonder)
@@ -456,7 +467,6 @@ class FirebaseYedekleyici(QDialog):
         layout.addLayout(btn_layout)
 
     def baglanti_kur(self):
-        # Eğer uygulama içinde daha önce init edildiyse tekrar etme
         if not firebase_admin._apps:
             try:
                 cred = credentials.Certificate(self.json_dosya_adi)
@@ -465,7 +475,7 @@ class FirebaseYedekleyici(QDialog):
                 })
             except FileNotFoundError:
                 QMessageBox.critical(self, "Hata",
-                                     f"'{self.json_dosya_adi}' dosyası bulunamadı!\nDosyayı programın yanına koyduğunuzdan emin olun.")
+                                     f"'{self.json_dosya_adi}' dosyası bulunamadı!")
                 return False
             except Exception as e:
                 QMessageBox.critical(self, "Bağlantı Hatası", str(e))
@@ -480,35 +490,48 @@ class FirebaseYedekleyici(QDialog):
         QApplication.processEvents()
 
         try:
+            # 1. ÜRÜNLERİ HAZIRLA
             urunler = self.veritabani.urunleri_getir()
-            data_export = {}
-
+            urunler_export = {}
             for urun in urunler:
-                # urun: (id, kod, ad, kategori, fiyat, miktar, birim, min, baslangic, skt)
-                u_id = str(urun[0])  # Key string olmalı
-                data_export[u_id] = {
-                    "urun_kodu": urun[1],
-                    "ad": urun[2],
-                    "kategori": urun[3],
-                    "fiyat": urun[4],
-                    "miktar": urun[5],
-                    "birim": urun[6],
-                    "min_stok": urun[7],
-                    "baslangic_miktari": urun[8],
+                u_id = str(urun[0])
+                urunler_export[u_id] = {
+                    "urun_kodu": urun[1], "ad": urun[2], "kategori": urun[3],
+                    "fiyat": urun[4], "miktar": urun[5], "birim": urun[6],
+                    "min_stok": urun[7], "baslangic_miktari": urun[8],
                     "son_kullanma_tarihi": urun[9]
                 }
 
-            self.status_lbl.setText("Firebase'e yazılıyor...")
+            # 2. STOK HAREKETLERİNİ (SATIŞLARI) HAZIRLA
+            self.veritabani.cursor.execute("SELECT * FROM stok_hareketleri")
+            hareketler = self.veritabani.cursor.fetchall()
+            hareketler_export = {}
+
+            # Tablo yapısı: id, urun_id, kullanici, islem, miktar_deg, yeni_mik, tarih, notlar, satis_fiyati
+            for h in hareketler:
+                h_id = str(h[0])
+                tarih_str = str(h[6])  # Timestamp'i string yap
+                hareketler_export[h_id] = {
+                    "urun_id": h[1], "kullanici_adi": h[2], "islem_tipi": h[3],
+                    "miktar_degisimi": h[4], "yeni_miktar": h[5], "tarih": tarih_str,
+                    "notlar": h[7], "satis_fiyati": h[8]
+                }
+
+            full_data = {
+                "urunler": urunler_export,
+                "hareketler": hareketler_export
+            }
+
+            self.status_lbl.setText("Firebase'e yükleniyor...")
             self.progress.setValue(50)
             QApplication.processEvents()
 
-            ref = db.reference('stoklar')
-            ref.set(data_export)
+            ref = db.reference('tam_yedek')  # 'stoklar' yerine yeni bir düğüm
+            ref.set(full_data)
 
             self.progress.setValue(100)
-            self.progress.setValue(100)
-            self.status_lbl.setText("Başarılı!")
-            QMessageBox.information(self, "Başarılı", "Veriler Firebase'e başarıyla yüklendi.")
+            self.status_lbl.setText("Yedekleme Başarılı!")
+            QMessageBox.information(self, "Başarılı", "Ürünler ve Satış Geçmişi buluta yüklendi.")
 
         except Exception as e:
             self.status_lbl.setText("Hata oluştu.")
@@ -518,7 +541,7 @@ class FirebaseYedekleyici(QDialog):
         if not self.baglanti_kur(): return
 
         onay = QMessageBox.warning(self, "DİKKAT",
-                                   "Buluttan veri indirmek, MEVCUT YEREL VERİTABANINI SİLİP üzerine yazacaktır.\nDevam etmek istiyor musunuz?",
+                                   "Buluttan indirmek, MEVCUT VERİLERİ SİLİP üzerine yazacaktır.\nDevam?",
                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if onay != QMessageBox.StandardButton.Yes: return
 
@@ -527,11 +550,11 @@ class FirebaseYedekleyici(QDialog):
         QApplication.processEvents()
 
         try:
-            ref = db.reference('stoklar')
+            ref = db.reference('tam_yedek')
             snapshot = ref.get()
 
             if not snapshot:
-                QMessageBox.warning(self, "Uyarı", "Firebase veritabanı boş.")
+                QMessageBox.warning(self, "Uyarı", "Bulutta yedek bulunamadı.")
                 return
 
             self.status_lbl.setText("Veritabanına işleniyor...")
@@ -539,44 +562,50 @@ class FirebaseYedekleyici(QDialog):
             QApplication.processEvents()
 
             cursor = self.veritabani.baglanti.cursor()
-            cursor.execute("DELETE FROM urunler")  # Temizlik
 
-            # Snapshot bir dictionary döner: {'1': {...}, '2': {...}}
-            if isinstance(snapshot, list):
-                # Bazı durumlarda Firebase liste olarak döndürebilir (ID'ler sıralıysa)
-                iterable = enumerate(snapshot)
-            else:
-                iterable = snapshot.items()
+            # Önce tabloları temizle
+            cursor.execute("DELETE FROM stok_hareketleri")
+            cursor.execute("DELETE FROM urunler")
 
-            for key, val in iterable:
+            # 1. ÜRÜNLERİ GERİ YÜKLE
+            urunler_data = snapshot.get('urunler', {})
+            # Veri list mi dict mi kontrolü (Firebase bazen liste döndürür)
+            iterable_urun = enumerate(urunler_data) if isinstance(urunler_data, list) else urunler_data.items()
+
+            for key, val in iterable_urun:
                 if val is None: continue
-                # Liste gelirse key index olur, dict gelirse key string ID olur
+                u_id = int(key) if isinstance(urunler_data, dict) else val.get('id', key)
+                cursor.execute("""
+                    INSERT INTO urunler (id, urun_kodu, ad, kategori, fiyat, miktar, birim, min_stok, baslangic_miktari, son_kullanma_tarihi)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    u_id, val.get('urun_kodu'), val.get('ad'), val.get('kategori'),
+                    float(val.get('fiyat', 0)), float(val.get('miktar', 0)), val.get('birim', 'adet'),
+                    float(val.get('min_stok', 0)), float(val.get('baslangic_miktari', 0)),
+                    val.get('son_kullanma_tarihi')
+                ))
 
-                try:
-                    cursor.execute("""
-                        INSERT INTO urunler (id, urun_kodu, ad, kategori, fiyat, miktar, birim, min_stok, baslangic_miktari, son_kullanma_tarihi)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        int(key) if isinstance(snapshot, dict) else val.get('id', key),
-                        val.get('urun_kodu'),
-                        val.get('ad'),
-                        val.get('kategori'),
-                        float(val.get('fiyat', 0)),
-                        float(val.get('miktar', 0)),
-                        val.get('birim', 'adet'),
-                        float(val.get('min_stok', 0)),
-                        float(val.get('baslangic_miktari', 0)),
-                        val.get('son_kullanma_tarihi')
-                    ))
-                except Exception as row_err:
-                    print(f"Satır hatası ID {key}: {row_err}")
+            # 2. HAREKETLERİ GERİ YÜKLE
+            hareket_data = snapshot.get('hareketler', {})
+            iterable_har = enumerate(hareket_data) if isinstance(hareket_data, list) else hareket_data.items()
+
+            for key, val in iterable_har:
+                if val is None: continue
+                h_id = int(key) if isinstance(hareket_data, dict) else val.get('id', key)
+                cursor.execute("""
+                    INSERT INTO stok_hareketleri (id, urun_id, kullanici_adi, islem_tipi, miktar_degisimi, yeni_miktar, tarih, notlar, satis_fiyati)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    h_id, val.get('urun_id'), val.get('kullanici_adi'), val.get('islem_tipi'),
+                    float(val.get('miktar_degisimi', 0)), float(val.get('yeni_miktar', 0)),
+                    val.get('tarih'), val.get('notlar'), val.get('satis_fiyati')
+                ))
 
             self.veritabani.baglanti.commit()
 
             self.progress.setValue(100)
-            self.progress.setValue(100)
             self.status_lbl.setText("Tamamlandı!")
-            QMessageBox.information(self, "Başarılı", "Veriler başarıyla senkronize edildi.")
+            QMessageBox.information(self, "Başarılı", "Tüm veriler başarıyla geri yüklendi.")
 
         except Exception as e:
             self.veritabani.baglanti.rollback()
@@ -590,22 +619,35 @@ class SatisDialog(QDialog):
         self.setWindowTitle("Satış Yap")
         self.setModal(True)
         self.setMinimumWidth(350)
+
         layout = QFormLayout(self)
+
         self.lbl_info = QLabel(f"<b>{urun_adi}</b><br>Mevcut Stok: {mevcut_stok:g} {birim}")
         self.lbl_info.setStyleSheet("color: #94a3b8; font-size: 13px; margin-bottom: 10px;")
         layout.addRow(self.lbl_info)
+
         self.lbl_alis = QLabel(f"Sistemdeki Alış/Maliyet Fiyatı: <b>{guncel_alis_fiyati:.2f}₺</b>")
         self.lbl_alis.setStyleSheet("color: #64748b; font-size: 11px;")
         layout.addRow(self.lbl_alis)
+
         self.input_miktar = QLineEdit()
         self.input_miktar.setPlaceholderText("Miktar girin...")
         self.input_miktar.setValidator(QDoubleValidator(0.0, 999999.0, 2))
         layout.addRow("Satılacak Miktar:", self.input_miktar)
+
         self.input_fiyat = QLineEdit(str(guncel_alis_fiyati))
         self.input_fiyat.setPlaceholderText("Birim satış fiyatı...")
         self.input_fiyat.setValidator(QDoubleValidator(0.0, 999999.0, 2))
         layout.addRow("Birim Satış Fiyatı (₺):", self.input_fiyat)
+
+        # --- BUTONLARI TÜRKÇELEŞTİRME KISMI ---
         self.buttonBox = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+
+        # Standart butonların metinlerini değiştiriyoruz
+        self.buttonBox.button(QDialogButtonBox.StandardButton.Ok).setText("Tamam")
+        self.buttonBox.button(QDialogButtonBox.StandardButton.Cancel).setText("İptal Et")
+        # --------------------------------------
+
         self.buttonBox.accepted.connect(self.accept)
         self.buttonBox.rejected.connect(self.reject)
         layout.addRow(self.buttonBox)
@@ -633,7 +675,7 @@ class UrunDuzenlemeDialog(QDialog):
         self.kategori_input = QLineEdit(urun_detaylari[3])
         self.fiyat_input = QLineEdit(str(urun_detaylari[4]))
         self.yeni_birim_input = QComboBox()
-        self.yeni_birim_input.addItems(["adet", "kg", "litre"])
+        self.yeni_birim_input.addItems(["adet", "kg", "litre", "paket", "kutu", "palet"])
         self.yeni_birim_input.setFixedWidth(100)
         self.yeni_birim_input.setEditable(True)
         self.yeni_birim_input.lineEdit().setReadOnly(True)
@@ -694,9 +736,22 @@ class YeniKullaniciDialog(QDialog):
         self.setWindowTitle("Yeni Kullanıcı Oluştur")
         self.setObjectName("authWindow")
         self.setMinimumWidth(400)
+
+        # Pencereyi ortala (Opsiyonel ama şık durur)
+        frame_geo = self.frameGeometry()
+        screen = self.screen()
+        if screen:
+            center_point = screen.availableGeometry().center()
+            frame_geo.moveCenter(center_point)
+            self.move(frame_geo.topLeft())
+
         self.ana_layout = QVBoxLayout(self)
+
+        # --- LOGO AYARLARI ---
         logo_layout = QVBoxLayout()
-        logo_layout.setContentsMargins(0, 10, 0, 20)
+        # Üst boşluğu 0 yaparak logoyu yukarı çektik
+        logo_layout.setContentsMargins(0, 0, 0, 20)
+
         logo_icon = QLabel()
         logo_icon.setObjectName("logoIcon")
         try:
@@ -704,7 +759,9 @@ class YeniKullaniciDialog(QDialog):
             logo_path = os.path.join(script_dir, "StockFlow_Logo.png")
             logo_pixmap = QPixmap(logo_path)
             if not logo_pixmap.isNull():
-                logo_icon.setPixmap(logo_pixmap.scaled(200, 50, Qt.AspectRatioMode.KeepAspectRatio,
+                # --- LOGO BOYUTU BURADAN AYARLANIYOR ---
+                # 200, 50 değerlerini -> 400, 150 yaptık (Büyüttük)
+                logo_icon.setPixmap(logo_pixmap.scaled(400, 150, Qt.AspectRatioMode.KeepAspectRatio,
                                                        Qt.TransformationMode.SmoothTransformation))
                 logo_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
             else:
@@ -712,12 +769,16 @@ class YeniKullaniciDialog(QDialog):
         except FileNotFoundError:
             logo_icon.setText("SF")
             logo_icon.setStyleSheet("font-size: 48px; qproperty-alignment: AlignCenter;")
+
         logo_text = QLabel("Yeni Hesap Oluştur")
         logo_text.setObjectName("logoText")
         logo_text.setStyleSheet("font-size: 20px; font-weight: bold; qproperty-alignment: AlignCenter;")
+
         logo_layout.addWidget(logo_icon)
         logo_layout.addWidget(logo_text)
         self.ana_layout.addLayout(logo_layout)
+
+        # --- FORM KISMI ---
         layout = QFormLayout()
         layout.setContentsMargins(20, 0, 20, 0)
         layout.setVerticalSpacing(15)
@@ -733,6 +794,7 @@ class YeniKullaniciDialog(QDialog):
         layout.addRow("Şifre:", self.sifre)
         layout.addRow("Şifre Tekrar:", self.sifre_t)
         self.ana_layout.addLayout(layout)
+
         self.buttonBox = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.buttonBox.button(QDialogButtonBox.StandardButton.Ok).setText("Oluştur")
         self.buttonBox.button(QDialogButtonBox.StandardButton.Cancel).setText("Geri")
@@ -872,7 +934,7 @@ class KarZararSayfasi(QWidget):
         self.tablo = QTableWidget()
         self.tablo.setColumnCount(7)
         self.tablo.setHorizontalHeaderLabels(
-            ["Ürün Kodu", "Ürün Adı", "Kategori", "Satılan Adet", "Alış Fiyatı", "Ort. Satış Fiyatı", "Kâr/Zarar"])
+            ["Ürün Kodu", "Ürün Adı", "Kategori", "Adet", "Alış Fiyatı", "Satış Fiyatı", "Kâr/Zarar"])
         header = self.tablo.horizontalHeader()
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
@@ -1266,7 +1328,7 @@ class AnaStokSayfasi(QWidget):
         self.ekleme_formu_frame.setObjectName("eklemeFormu")
         ekleme_duzen = QFormLayout(self.ekleme_formu_frame)
         self.yeni_urun_kodu_input = QLineEdit()
-        self.yeni_urun_kodu_input.setInputMask("000")
+        self.yeni_urun_kodu_input.setInputMask("0000000000000")
         self.yeni_urun_input = QLineEdit()
         self.yeni_kategori_input = QLineEdit()
         self.yeni_fiyat_input = QLineEdit()
@@ -1275,7 +1337,7 @@ class AnaStokSayfasi(QWidget):
         self.yeni_miktar_input = QLineEdit()
         self.yeni_miktar_input.setValidator(self.float_validator)
         self.yeni_birim_input = QComboBox()
-        self.yeni_birim_input.addItems(["    adet", "    kg", "    litre"])
+        self.yeni_birim_input.addItems(["    adet", "    kg", "    litre", "    paket", "    kutu", "    palet"])
         self.yeni_birim_input.setFixedWidth(100)
         miktar_layout.addWidget(self.yeni_miktar_input, 1)
         miktar_layout.addWidget(self.yeni_birim_input)
@@ -1286,7 +1348,7 @@ class AnaStokSayfasi(QWidget):
         self.yeni_skt_input.setDate(QDate.currentDate().addYears(1))
         self.yeni_skt_input.setDisplayFormat("yyyy-MM-dd")
         self.onayla_ekle_btn = QPushButton("Onayla")
-        ekleme_duzen.addRow("Ürün Kodu (3 Hane):", self.yeni_urun_kodu_input)
+        ekleme_duzen.addRow("Ürün Kodu (13 Hane):", self.yeni_urun_kodu_input)
         ekleme_duzen.addRow("Ürün Adı:", self.yeni_urun_input)
         ekleme_duzen.addRow("Kategori:", self.yeni_kategori_input)
         ekleme_duzen.addRow("Alış Fiyatı (Maliyet ₺):", self.yeni_fiyat_input)
@@ -1478,7 +1540,7 @@ class AnaStokSayfasi(QWidget):
     def yeni_urun_ekle(self):
         kod = self.yeni_urun_kodu_input.text()
         if not self.yeni_urun_kodu_input.hasAcceptableInput():
-            QMessageBox.warning(self, "Uyarı", "Ürün Kodu 3 haneli olmalıdır.")
+            QMessageBox.warning(self, "Uyarı", "Ürün Kodu 13 haneli olmalıdır.")
             return
         ad = self.yeni_urun_input.text().strip().upper()
         kat = self.yeni_kategori_input.text().strip().upper()
@@ -1567,12 +1629,31 @@ class AnaStokSayfasi(QWidget):
         mevcut = detaylar[5]
         birim = detaylar[6]
         guncel_alis_fiyati = detaylar[4]
+
         if mod == 'artır':
             fiil = "Artır"
-            m, ok = QInputDialog.getDouble(self, f"Stok {fiil} - [{urun_adi}]",
-                                           f"Mevcut Miktar: {mevcut:g} {birim}\nLütfen eklenecek miktarı girin:", 1.0,
-                                           0.0, 999999.0, 2)
-            if ok: self.stok_miktari_degistir(urun_id, urun_adi, m)
+
+            # --- YENİ YÖNTEM: Özel Buton İsimli Dialog ---
+            dialog = QInputDialog(self)
+            dialog.setWindowTitle(f"Stok {fiil} - [{urun_adi}]")
+            dialog.setLabelText(f"Mevcut Miktar: {mevcut:g} {birim}\nLütfen eklenecek miktarı girin:")
+
+            # Sayısal giriş ayarları
+            dialog.setInputMode(QInputDialog.InputMode.DoubleInput)
+            dialog.setDoubleRange(0.0, 999999.0)
+            dialog.setDoubleDecimals(2)
+            dialog.setDoubleValue(1.0)
+
+            # Buton metinlerini değiştirme
+            dialog.setOkButtonText("Tamam")
+            dialog.setCancelButtonText("İptal Et")
+
+            # Pencereyi aç ve sonucu kontrol et
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                m = dialog.doubleValue()
+                self.stok_miktari_degistir(urun_id, urun_adi, m)
+            # ---------------------------------------------
+
         elif mod == 'satis':
             dialog = SatisDialog(urun_adi, mevcut, birim, guncel_alis_fiyati, self)
             if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -1588,11 +1669,23 @@ class AnaStokSayfasi(QWidget):
             QMessageBox.warning(self, "Uyarı", mesaj)
 
     def urun_sil(self, urun_id, urun_adi):
-        onay = QMessageBox.question(self, "Silmeyi Onayla",
-                                    f"<b>{urun_adi}</b> (ID: {urun_id}) ürününü silmek istediğinizden emin misiniz?",
-                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                    QMessageBox.StandardButton.No)
-        if onay == QMessageBox.StandardButton.Yes:
+        # Standart soru kutusu yerine özel kutu oluşturuyoruz
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Silmeyi Onayla")
+        msg.setText(f"<b>{urun_adi}</b> (ID: {urun_id}) ürününü silmek istediğinizden emin misiniz?")
+        msg.setIcon(QMessageBox.Icon.Question)
+
+        # Butonları Türkçe metinlerle ekliyoruz
+        btn_evet = msg.addButton("Evet", QMessageBox.ButtonRole.YesRole)
+        btn_hayir = msg.addButton("Hayır", QMessageBox.ButtonRole.NoRole)
+
+        # Varsayılan olarak 'Hayır' seçili gelsin (Güvenlik için)
+        msg.setDefaultButton(btn_hayir)
+
+        msg.exec()
+
+        # Eğer basılan buton 'Evet' ise silme işlemini yap
+        if msg.clickedButton() == btn_evet:
             self.veritabani.urun_sil(urun_id, self.kullanici_adi)
             self.stogu_guncelle_arayuz()
             self.status_bar.showMessage(f"'{urun_adi}' silindi.", 3000)
@@ -2102,15 +2195,34 @@ class AnaPencere(QMainWindow):
 # 6. LOGIN AND SETUP WINDOWS
 # =============================================================================
 
-class BaseAuthWindow(QWidget):
+# --- BURADAKİ DEĞİŞİKLİK: QWidget yerine QDialog yapıldı ---
+class BaseAuthWindow(QDialog):
     def __init__(self, title, size=(400, 300)):
         super().__init__()
         self.setWindowTitle(title)
-        self.setGeometry(400, 400, *size)
+
+        # 1. Boyutlandırma ve İsimlendirme
+        self.setFixedSize(*size)
         self.setObjectName("authWindow")
+
+        # 2. Pencereyi Ekranın Ortasına Taşıma
+        frame_geo = self.frameGeometry()
+        screen = self.screen()
+        if screen:
+            center_point = screen.availableGeometry().center()
+            frame_geo.moveCenter(center_point)
+            self.move(frame_geo.topLeft())
+
+        # 3. Ana Düzen (Layout)
         self.ana_layout = QVBoxLayout(self)
+        # GÜNCELLEME 1: Ana pencerenin üst boşluğunu (ikinci parametre) azalttık (20 -> 5)
+        self.ana_layout.setContentsMargins(20, 5, 20, 20)
+
+        # 4. Logo Kısmı
         logo_layout = QVBoxLayout()
-        logo_layout.setContentsMargins(0, 10, 0, 20)
+        # GÜNCELLEME 2: Logonun kendi üst boşluğunu sıfırladık (10 -> 0)
+        logo_layout.setContentsMargins(0, 0, 0, 20)
+
         logo_icon = QLabel()
         logo_icon.setObjectName("logoIcon")
         try:
@@ -2118,7 +2230,8 @@ class BaseAuthWindow(QWidget):
             logo_path = os.path.join(script_dir, "StockFlow_Logo.png")
             logo_pixmap = QPixmap(logo_path)
             if not logo_pixmap.isNull():
-                logo_icon.setPixmap(logo_pixmap.scaled(200, 150, Qt.AspectRatioMode.KeepAspectRatio,
+                # Logonun tam görünmesi için genişliği 400 yaptık
+                logo_icon.setPixmap(logo_pixmap.scaled(400, 150, Qt.AspectRatioMode.KeepAspectRatio,
                                                        Qt.TransformationMode.SmoothTransformation))
                 logo_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
             else:
@@ -2126,6 +2239,7 @@ class BaseAuthWindow(QWidget):
         except FileNotFoundError:
             logo_icon.setText("SF")
             logo_icon.setStyleSheet("font-size: 48px; qproperty-alignment: AlignCenter;")
+
         logo_layout.addWidget(logo_icon)
         self.ana_layout.addLayout(logo_layout)
 
@@ -2307,7 +2421,7 @@ class AnaKontrolcu:
     def ana_pencereyi_goster(self, kullanici_adi):
         try:
             self.ana_pencere = AnaPencere(kullanici_adi, self.veritabani)
-            self.ana_pencere.show()
+            self.ana_pencere.showMaximized()
             self.bildirim_gonder_kontrolu()
             if self.mevcut_pencere: self.mevcut_pencere.close()
             if self.degistirme_penceresi:
@@ -2475,7 +2589,7 @@ if __name__ == "__main__":
 
     # İkon dosyasını belirle (Önce .ico, yoksa .png dene)
     icon_path = os.path.join(script_dir, "logo.png")
-    
+
 
     # 3. WINDOWS'A ÖZEL AYAR (Sadece Windows ise çalışır)
     # os.name 'nt' ise Windows demektir.
