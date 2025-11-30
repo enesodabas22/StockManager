@@ -67,8 +67,9 @@ class VeritabaniYoneticisi:
         self.baglanti = sqlite3.connect(db_adi, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
         self.baglanti.execute("PRAGMA foreign_keys = ON")
         self.cursor = self.baglanti.cursor()
-        self.veritabani_migrasyonu_kontrol_et()
         self.tablolari_olustur()
+        self.veritabani_migrasyonu_kontrol_et()
+
 
     def _sutun_tipi_getir(self, tablo_adi, sutun_adi):
         try:
@@ -1370,7 +1371,7 @@ class AnaStokSayfasi(QWidget):
         self.yeni_miktar_input = QLineEdit()
         self.yeni_miktar_input.setValidator(self.decimal_validator)
         self.yeni_birim_input = QComboBox()
-        self.yeni_birim_input.addItems(["    adet", "    kg", "    litre", "    paket", "    kutu", "    palet"])
+        self.yeni_birim_input.addItems(["adet", "kg", "litre", "paket", "kutu", "palet"])
         self.yeni_birim_input.setFixedWidth(100)
         miktar_layout.addWidget(self.yeni_miktar_input, 1)
         miktar_layout.addWidget(self.yeni_birim_input)
