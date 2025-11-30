@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "stockflow-app-3a413",
+  "private_key_id": "8fcf879b644446f58c7468aefe940c2044bf2fa4",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQChzmtw5Z4XWCFp\nTGjQ6lPZAQkh6J0bGsfYM5kre358hS7dzh6yimerAD1zjsHx/YvnXVqSoPyy2Xpd\nD5sGHKbm5dqBI2d3MZDcleWKOwcmLW3Y8/pgJPZWHiSXC4nyivJRwipuUg3t9/EJ\n965JPluh3U1x4rLWoHLzgWLl/Gfs3hLIboCH3PVQXyolGXY3DkKgrhqC41ozwyNM\n72LrjBhd9TMZtDjURDMLRxmktwnqBgZbEFB3k/xBe5eBpq7RwzoBLm5iv3JzUQgM\nVO0YvjrzyN1iPakL6rJDG3uwFVUyC4AHK28ajJuzKFE15FeTEnmWvboEP8CO8tQq\nblkh5AKhAgMBAAECggEAQDInA3Q+bFGdc+sKXPTTTnHwPyFMj6/o4PjbyNomvV2T\n0hGQsVJjPf+K4fmeLhXjt2gc4rb3ezf4qcpivaKJf2trbTfwOWSTbkkUeGrh874r\nalumFxYjG9i6uKit0upYqKJp9joc57Cq08MORWX1sfsc2lXQkYG4Ca9oXwns65cv\nmuMKat5CD10Q9R6t4+/ofiYhyeN7JBfHNecGUd6Zfo3CQexzSVqEE0U0qS8ksWIx\nwAwXf5Dv0GawXocyMrS+EUN83qgDURsetps/Hj/0tlR+xMdddjfXeoBzENIlAUJn\nyjjMML6z946ZOmXB/WeWSEeagS/vFbvFZvs+Zng0BwKBgQDioa2heb4ra06hAV9M\nBtDkPoVuaxfCU+HtWFuDVWKv/5ag4eyyOe9WUYT9HhuSkR/uyt8A0q6vJPikesVI\nvf3tj16UbUPrZ/K5tUddjCh6ZBjatrvJmFIvm/52IP1545UHs56PdzzWGC3r5mZh\n1sFI5yvp3yd7rhM0NX7b5txbpwKBgQC2xjdLwtvfs5lgV7DcUYygV+dJzybi25e/\n9s9tWWpPplfUK/KoQIgnSxOKPwCU4j2sERezyXU650+VDbUuE5WPQbSyKqPXLSx/\nvPC+0+QRvD3f33nWJEgZepZgs6mcyHXW5Ffxz/3u7Lw2kE+CcTRUt5C46pLAGWS+\n452dTOxYdwKBgQCuE2fNxzhWG3dq3iX3vKiJGKje1m2Ke2nnJ94q89P4wcZOTxrD\nDxMSZ01SKuUc4FH51mQSOsGokCpYFGEi7aR065HHSmJIGDDtihuF9FlHIUmh/Ygi\nYdiG7zg2PkLUdAWNw97/7aOSA0KKlw9/CTivqbkmS50FOAFSMeD+QcZyswKBgQCH\ncy3Xf3jit36a32G6ZNUKnxpQoKv4wzQalxXxu6oFjQjZvBgAiJJeTE0WzsnnjCKY\nObKPEmVGWdWoaJg0pV7Y46C9yMvS0y9/Gs5vHSiP3Ckel8b647hq6WY4E+1Gu2hY\n8LAcDD/rqJVy+k9yI+LcRY2C/JP0uNzoelZ8FF2y0QKBgQCeowU5IjGlzoXIBMNj\ntrxh/g/wouG/KbopgxNSw4ToD3Z76ZxD9w3cn/zyTdbxvHaPabk+eqMM2gnzqqPV\nPilzxnsyX8A8FqXE5ZeNp/lfprakQHf9lRuobUVGI+wLTk928a2u6uGr3bNpYTqv\nLrkUc0FsRcwbNN3/pe2w5Troew==\n-----END PRIVATE KEY-----\n",
+  "client_email": "firebase-adminsdk-fbsvc@stockflow-app-3a413.iam.gserviceaccount.com",
+  "client_id": "115006512482714892500",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40stockflow-app-3a413.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
