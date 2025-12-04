@@ -2292,6 +2292,7 @@ class DashboardPage(QWidget):
 # =============================================================================
 
 class AnaPencere(QMainWindow):
+    cikis_istendi = pyqtSignal()
     def __init__(self, kullanici_adi, veritabani_yoneticisi):
         super().__init__()
         self.kullanici_adi = kullanici_adi
@@ -2433,7 +2434,7 @@ class AnaPencere(QMainWindow):
         self.ayarlar_menu = QMenu(self)
         self.kullanici_degistir_action = QAction("Mevcut Kullanıcı Bilgilerini Değiştir", self)
         self.kullanici_degistir_action.triggered.connect(self.kullanici_degistir_dialogu_ac)
-        self.yeni_kullanici_action = QAction("Yeni Kullanıcı Ekle...", self)
+        self.yeni_kullanici_action = QAction("Yeni Kullanıcı Ekle", self)
         self.yeni_kullanici_action.triggered.connect(self.yeni_kullanici_dialogu_ac)
 
         # --- FİREBASE AKSİYONU ---
@@ -2447,7 +2448,7 @@ class AnaPencere(QMainWindow):
         self.ornek_veri_action.triggered.connect(self.ornek_veri_yukle_onay)
 
         self.cikis_action = QAction("Çıkış Yap", self)
-        self.cikis_action.triggered.connect(self.close)
+        self.cikis_action.triggered.connect(self.oturumu_kapat)
 
         self.ayarlar_menu.addAction(self.kullanici_degistir_action)
         self.ayarlar_menu.addAction(self.yeni_kullanici_action)
@@ -2457,6 +2458,11 @@ class AnaPencere(QMainWindow):
         self.ayarlar_menu.addAction(self.ornek_veri_action)
         self.ayarlar_menu.addSeparator()
         self.ayarlar_menu.addAction(self.cikis_action)
+
+    def oturumu_kapat(self):
+        """Sinyal gönderir ve pencereyi kapatır."""
+        self.cikis_istendi.emit()  # Kontrolcüye haber ver
+        self.close()
 
     def ornek_veri_yukle_onay(self):
         cevap = QMessageBox.question(
@@ -2761,6 +2767,7 @@ class AnaKontrolcu:
     def ana_pencereyi_goster(self, kullanici_adi):
         try:
             self.ana_pencere = AnaPencere(kullanici_adi, self.veritabani)
+            self.ana_pencere.cikis_istendi.connect(self.oturum_kapat_ve_giris_yap)
             self.ana_pencere.showMaximized()
             self.bildirim_gonder_kontrolu()
             if self.mevcut_pencere: self.mevcut_pencere.close()
@@ -2776,6 +2783,14 @@ class AnaKontrolcu:
             traceback.print_exc()
             QMessageBox.critical(None, "Kritik Hata", f"Ana pencere açılırken bir hata oluştu:\n{str(e)}")
             print(f"HATA: {e}")
+            pass
+
+    def oturum_kapat_ve_giris_yap(self):
+        """Ana pencere kapandığında giriş ekranını tekrar açar."""
+        # Ana pencere zaten kapanıyor ama referansı temizleyelim
+        self.ana_pencere = None
+        # Giriş ekranını tekrar çağır
+        self.login_penceresini_goster()
 
     def degistirme_penceresini_goster(self):
         if self.login_penceresi and self.login_penceresi.isVisible(): self.login_penceresi.hide()
