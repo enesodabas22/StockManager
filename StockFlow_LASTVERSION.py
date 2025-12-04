@@ -67,8 +67,9 @@ class VeritabaniYoneticisi:
         self.baglanti = sqlite3.connect(db_adi, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
         self.baglanti.execute("PRAGMA foreign_keys = ON")
         self.cursor = self.baglanti.cursor()
-        self.veritabani_migrasyonu_kontrol_et()
         self.tablolari_olustur()
+        self.veritabani_migrasyonu_kontrol_et()
+
 
     def _sutun_tipi_getir(self, tablo_adi, sutun_adi):
         try:
@@ -630,14 +631,18 @@ class SatisDialog(QDialog):
         self.lbl_alis.setStyleSheet("color: #64748b; font-size: 11px;")
         layout.addRow(self.lbl_alis)
 
+        # --- GÜNCELLEME: QDoubleValidator yerine QRegularExpressionValidator ---
+        # Bu regex: [Rakamlar] (opsiyonel nokta veya virgül) [Rakamlar] yapısına izin verir.
+        regex = QRegularExpression("[0-9]+([.,][0-9]+)?")
+
         self.input_miktar = QLineEdit()
         self.input_miktar.setPlaceholderText("Miktar girin...")
-        self.input_miktar.setValidator(QDoubleValidator(0.0, 999999.0, 2))
+        self.input_miktar.setValidator(QRegularExpressionValidator(regex))
         layout.addRow("Satılacak Miktar:", self.input_miktar)
 
         self.input_fiyat = QLineEdit(str(guncel_alis_fiyati))
         self.input_fiyat.setPlaceholderText("Birim satış fiyatı...")
-        self.input_fiyat.setValidator(QDoubleValidator(0.0, 999999.0, 2))
+        self.input_fiyat.setValidator(QRegularExpressionValidator(regex))
         layout.addRow("Birim Satış Fiyatı (₺):", self.input_fiyat)
 
         # --- BUTONLARI TÜRKÇELEŞTİRME KISMI ---
@@ -654,6 +659,7 @@ class SatisDialog(QDialog):
 
     def get_values(self):
         try:
+            # Kullanıcı virgül girse bile nokta ile değiştirip float yapıyoruz
             miktar_text = self.input_miktar.text().replace(',', '.')
             fiyat_text = self.input_fiyat.text().replace(',', '.')
             if not miktar_text: return None, None
@@ -701,10 +707,15 @@ class UrunDuzenlemeDialog(QDialog):
         self.form_layout.addRow("Birim:", self.yeni_birim_input)
         self.form_layout.addRow("Min. Stok:", self.min_stok_input)
         self.form_layout.addRow("Son Kul. Tarihi:", self.skt_input)
-        float_validator = QDoubleValidator()
-        float_validator.setBottom(0.0)
-        self.fiyat_input.setValidator(float_validator)
-        self.min_stok_input.setValidator(float_validator)
+
+        # --- GÜNCELLEME: Esnek Validator ---
+        regex = QRegularExpression("[0-9]+([.,][0-9]+)?")
+        validator = QRegularExpressionValidator(regex)
+
+        self.fiyat_input.setValidator(validator)
+        self.min_stok_input.setValidator(validator)
+        # -----------------------------------
+
         self.buttonBox = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.buttonBox.button(QDialogButtonBox.StandardButton.Cancel).setText("İptal Et")
         self.buttonBox.button(QDialogButtonBox.StandardButton.Ok).setText("Kaydet")
@@ -840,12 +851,17 @@ class FiltreDialog(QDialog):
         stok_layout.addWidget(QLabel("-"))
         stok_layout.addWidget(self.max_stok)
         layout.addRow("Stok Aralığı:", stok_layout)
-        float_validator = QDoubleValidator()
-        float_validator.setBottom(0.0)
-        self.min_fiyat.setValidator(float_validator)
-        self.max_fiyat.setValidator(float_validator)
-        self.min_stok.setValidator(float_validator)
-        self.max_stok.setValidator(float_validator)
+
+        # --- GÜNCELLEME: Esnek Validator ---
+        regex = QRegularExpression("[0-9]+([.,][0-9]+)?")
+        validator = QRegularExpressionValidator(regex)
+
+        self.min_fiyat.setValidator(validator)
+        self.max_fiyat.setValidator(validator)
+        self.min_stok.setValidator(validator)
+        self.max_stok.setValidator(validator)
+        # -----------------------------------
+
         self.sadece_dusuk_stok = QCheckBox("Sadece düşük stoktakileri göster")
         self.sadece_dusuk_stok.setChecked(mevcut_filtreler.get("dusuk_stok_only", False))
         layout.addRow("", self.sadece_dusuk_stok)
@@ -1236,10 +1252,22 @@ class StokHareketSayfasi(QWidget):
         menu.exec(self.rapor_tablosu.viewport().mapToGlobal(pos))
 
     def hareketi_geri_al(self, hareket_id):
-        emin_misin = QMessageBox.question(self, "Geri Alma Onayı",
-                                          "Bu işlemi geri almak istediğinize emin misiniz?\nStok miktarı işlem öncesine döndürülecek.",
-                                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if emin_misin == QMessageBox.StandardButton.Yes:
+        # --- GÜNCELLEME: Türkçe Butonlu Onay Kutusu ---
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Geri Alma Onayı")
+        msg.setText("Bu işlemi geri almak istediğinize emin misiniz?\nStok miktarı işlem öncesine döndürülecek.")
+        msg.setIcon(QMessageBox.Icon.Question)
+
+        # Butonları Türkçe olarak ekliyoruz
+        btn_evet = msg.addButton("Evet", QMessageBox.ButtonRole.YesRole)
+        btn_hayir = msg.addButton("Hayır", QMessageBox.ButtonRole.NoRole)
+
+        # Varsayılan olarak Hayır seçili olsun (Güvenlik için)
+        msg.setDefaultButton(btn_hayir)
+
+        msg.exec()
+
+        if msg.clickedButton() == btn_evet:
             basari, mesaj = self.veritabani.islem_geri_al(hareket_id, self.kullanici_adi)
             if basari:
                 self.raporu_guncelle()
@@ -1255,9 +1283,12 @@ class AnaStokSayfasi(QWidget):
         self.status_bar = status_bar
         self.kullanici_adi = kullanici_adi
         self.guncel_filtreler = {}
-        self.float_validator = QDoubleValidator()
-        self.float_validator.setBottom(0.0)
-        self.float_validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+
+        # --- GÜNCELLEME: Global Esnek Regex Validator ---
+        regex = QRegularExpression("[0-9]+([.,][0-9]+)?")
+        self.decimal_validator = QRegularExpressionValidator(regex)
+        # -----------------------------------------------
+
         self.arayuz_olustur()
         self.stogu_guncelle_arayuz()
 
@@ -1329,23 +1360,23 @@ class AnaStokSayfasi(QWidget):
         ekleme_duzen = QFormLayout(self.ekleme_formu_frame)
         self.yeni_urun_kodu_input = QLineEdit()
         # self.yeni_urun_kodu_input.setInputMask("0000000000000") # KALDIRILDI: NumLock sorununa neden olabiliyor
-        self.yeni_urun_kodu_input.setMaxLength(3)
-        self.yeni_urun_kodu_input.setValidator(QRegularExpressionValidator(QRegularExpression("\\d{3}")))
-        self.yeni_urun_kodu_input.setPlaceholderText("3 Haneli Kod")
+        self.yeni_urun_kodu_input.setMaxLength(13)
+        self.yeni_urun_kodu_input.setValidator(QRegularExpressionValidator(QRegularExpression("\\d{13}")))
+        self.yeni_urun_kodu_input.setPlaceholderText("13 Haneli Kod")
         self.yeni_urun_input = QLineEdit()
         self.yeni_kategori_input = QLineEdit()
         self.yeni_fiyat_input = QLineEdit()
-        self.yeni_fiyat_input.setValidator(self.float_validator)
+        self.yeni_fiyat_input.setValidator(self.decimal_validator)
         miktar_layout = QHBoxLayout()
         self.yeni_miktar_input = QLineEdit()
-        self.yeni_miktar_input.setValidator(self.float_validator)
+        self.yeni_miktar_input.setValidator(self.decimal_validator)
         self.yeni_birim_input = QComboBox()
-        self.yeni_birim_input.addItems(["    adet", "    kg", "    litre", "    paket", "    kutu", "    palet"])
+        self.yeni_birim_input.addItems(["adet", "kg", "litre", "paket", "kutu", "palet"])
         self.yeni_birim_input.setFixedWidth(100)
         miktar_layout.addWidget(self.yeni_miktar_input, 1)
         miktar_layout.addWidget(self.yeni_birim_input)
         self.yeni_min_stok_input = QLineEdit("10")
-        self.yeni_min_stok_input.setValidator(self.float_validator)
+        self.yeni_min_stok_input.setValidator(self.decimal_validator)
         self.yeni_skt_input = QDateEdit()
         self.yeni_skt_input.setCalendarPopup(True)
         self.yeni_skt_input.setDate(QDate.currentDate().addYears(1))
@@ -1542,8 +1573,8 @@ class AnaStokSayfasi(QWidget):
 
     def yeni_urun_ekle(self):
         kod = self.yeni_urun_kodu_input.text()
-        if len(kod) != 3:
-            QMessageBox.warning(self, "Uyarı", "Ürün Kodu 3 haneli olmalıdır.")
+        if len(kod) != 13:
+            QMessageBox.warning(self, "Uyarı", "Ürün Kodu 13 haneli olmalıdır.")
             return
         ad = self.yeni_urun_input.text().strip().upper()
         kat = self.yeni_kategori_input.text().strip().upper()
@@ -1718,9 +1749,11 @@ class AnaStokSayfasi(QWidget):
             return
         yeni_deger_str = item.text()
         if sutun == 3:
-            basari, mesaj = self.veritabani.urun_hucre_guncelle(urun_id, "kategori", yeni_deger_str.upper(), self.kullanici_adi)
+            basari, mesaj = self.veritabani.urun_hucre_guncelle(urun_id, "kategori", yeni_deger_str.upper(),
+                                                                self.kullanici_adi)
         elif sutun == 4:
             try:
+                # --- Fiyat güncelleme kısmında da virgül/nokta değişimi yapıyoruz ---
                 yeni_fiyat = float(yeni_deger_str.replace('₺', '').replace(',', '.').strip())
                 if yeni_fiyat < 0: raise ValueError("Fiyat negatif olamaz")
                 basari, mesaj = self.veritabani.urun_hucre_guncelle(urun_id, "fiyat", yeni_fiyat, self.kullanici_adi)
@@ -2038,7 +2071,7 @@ class AnaPencere(QMainWindow):
         logo_layout.addWidget(logo_icon)
         logo_layout.addStretch()
 
-        # --- Navigasyon Listesi (Değişiklik Burada) ---
+        # --- Navigasyon Listesi ---
         self.nav_list = QListWidget()
         self.nav_list.setObjectName("sidebarNav")
 
@@ -2051,14 +2084,9 @@ class AnaPencere(QMainWindow):
         self.nav_list.addItem(QListWidgetItem("Satışlar"))
 
         # --- YENİ EKLENEN AYARLAR ---
-        # 1. Dikey kaydırma çubuğunu tamamen kapatıyoruz
         self.nav_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        # 2. Yatay kaydırma çubuğunu kapatıyoruz
         self.nav_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        # 3. Listenin tüm öğeleri alacak kadar yüksek olmasını sağlıyoruz (Piksell cinsinden)
-        # 6 öğe var, CSS paddingleri ile yaklaşık 350-400px yeterli olacaktır.
         self.nav_list.setMinimumHeight(400)
-        # 4. Seçim yapıldığında mavi çerçevenin çıkmasını engellemek için (görsel iyileştirme)
         self.nav_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         # ----------------------------
 
@@ -2078,9 +2106,8 @@ class AnaPencere(QMainWindow):
 
         self.main_layout.addWidget(self.sidebar)
 
-        # --- Buradan sonrası aynı (Header ve Content) ---
+        # --- Header ve Content ---
         content_container = QFrame()
-        # ... (kodun geri kalanı aynı) ...
         content_container.setObjectName("contentContainer")
         content_layout = QVBoxLayout(content_container)
         content_layout.setContentsMargins(0, 0, 0, 0)
@@ -2129,9 +2156,6 @@ class AnaPencere(QMainWindow):
         self.nav_list.currentRowChanged.connect(self.sayfa_degisti)
         self.nav_list.setCurrentRow(0)
         self.status_bar.showMessage(f"Hoş geldiniz, {self.kullanici_adi}!", 5000)
-
-    def init_menu_actions(self):
-        self.ayarlar_menu = QMenu(self)
 
     def init_menu_actions(self):
         self.ayarlar_menu = QMenu(self)
@@ -2472,6 +2496,8 @@ class AnaKontrolcu:
             print(f"Bildirim hatası: {e}")
 
 
+
+
 # =============================================================================
 # 8. STYLESHEET AND EXECUTION
 # =============================================================================
@@ -2620,4 +2646,4 @@ if __name__ == "__main__":
     kontrolcu = AnaKontrolcu()
     kontrolcu.baslat()
 
-    sys.exit(app.exec())
+    sys.exit(app.exec())# cook your dish here
