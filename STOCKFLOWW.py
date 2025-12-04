@@ -40,7 +40,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QDate, QRectF, QSize, QLocale, 
 
 # --- YAPILANDIRMA ---
 FIREBASE_KEY_PATH = "firebase_key.json"
-FIREBASE_DB_URL = "https://stockfloww-3cf71-default-rtdb.europe-west1.firebasedatabase.app/"
+FIREBASE_DB_URL = "https://stockflow-app-3a413-default-rtdb.europe-west1.firebasedatabase.app/"
 DB_NAME = "stok_veritabani.db"
 
 
@@ -2116,31 +2116,7 @@ class DashboardPage(QWidget):
         cards_layout.addWidget(self.card_monthly_sales)
         layout.addLayout(cards_layout)
 
-        # --- Hızlı İşlemler (YENİ) ---
-        quick_actions_layout = QHBoxLayout()
-        quick_actions_layout.setSpacing(10)
-        
-        btn_new_product = QPushButton("+ Yeni Ürün Ekle")
-        btn_new_product.setObjectName("yeniUrunBtn") # Mevcut stili kullan
-        btn_new_product.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_new_product.setFixedHeight(40)
-        # Ana pencereye erişip oradaki fonksiyonu çağırmak için sinyal kullanmak daha doğru olurdu ama
-        # pratiklik için parent üzerinden erişeceğiz (Eğer parent AnaPencere ise)
-        # Ancak burada parent genellikle StackedWidget.
-        # Bu yüzden butonları public yapıp AnaPencere'den bağlayacağız.
-        self.btn_new_product = btn_new_product
-        
-        btn_export = QPushButton("📤 Raporu Dışa Aktar")
-        btn_export.setObjectName("filterBtn")
-        btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_export.setFixedHeight(40)
-        self.btn_export = btn_export
 
-        quick_actions_layout.addWidget(self.btn_new_product)
-        quick_actions_layout.addWidget(self.btn_export)
-        quick_actions_layout.addStretch() # Sola yasla
-        
-        layout.addLayout(quick_actions_layout)
 
         # --- Grafikler (Üst Satır) ---
         charts_layout = QHBoxLayout()
@@ -2425,9 +2401,7 @@ class AnaPencere(QMainWindow):
         self.stacked_widget.addWidget(self.satis_raporu_sayfasi)  # Index 4
         self.stacked_widget.addWidget(self.kar_zarar_sayfasi)  # Index 5
 
-        # --- Dashboard Buton Bağlantıları (YENİ) ---
-        self.dashboard_sayfasi.btn_new_product.clicked.connect(self.hizli_urun_ekle)
-        self.dashboard_sayfasi.btn_export.clicked.connect(self.ana_stok_sayfasi.verileri_disa_aktar)
+
 
         content_layout.addWidget(self.stacked_widget, 1)
         self.main_layout.addWidget(content_container, 1)
