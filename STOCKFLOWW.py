@@ -40,7 +40,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QDate, QRectF, QSize, QLocale, 
 
 # --- YAPILANDIRMA ---
 FIREBASE_KEY_PATH = "firebase_key.json"
-FIREBASE_DB_URL = "https://stockflow-app-3a413-default-rtdb.europe-west1.firebasedatabase.app/"
+FIREBASE_DB_URL = "https://stockfloww-3cf71-default-rtdb.europe-west1.firebasedatabase.app/"
 DB_NAME = "stok_veritabani.db"
 
 
@@ -620,10 +620,20 @@ class FirebaseYedekleyici(QDialog):
     def buluttan_cek(self):
         if not self.baglanti_kur(): return
 
-        onay = QMessageBox.warning(self, "DİKKAT",
-                                   "Buluttan indirmek, MEVCUT VERİLERİ SİLİP üzerine yazacaktır.\nDevam?",
-                                   QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if onay != QMessageBox.StandardButton.Yes: return
+        msg = QMessageBox(self)
+        msg.setWindowTitle("DİKKAT")
+        msg.setText("Buluttan indirmek, MEVCUT VERİLERİ SİLİP üzerine yazacaktır.\nDevam etmek istiyor musunuz?")
+        msg.setIcon(QMessageBox.Icon.Warning)
+        
+        # Butonları Türkçe olarak ekliyoruz
+        btn_evet = msg.addButton("Evet", QMessageBox.ButtonRole.YesRole)
+        btn_hayir = msg.addButton("Hayır", QMessageBox.ButtonRole.NoRole)
+        
+        msg.setDefaultButton(btn_hayir) # Varsayılan olarak Hayır seçili olsun (Güvenlik)
+        msg.exec()
+
+        if msg.clickedButton() != btn_evet:
+            return
 
         self.status_lbl.setText("Veriler indiriliyor...")
         self.progress.setValue(20)
