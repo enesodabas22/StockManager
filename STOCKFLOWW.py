@@ -2431,16 +2431,16 @@ class AnaPencere(QMainWindow):
 
     def init_menu_actions(self):
         self.ayarlar_menu = QMenu(self)
-        self.kullanici_degistir_action = QAction("Mevcut Kullanıcı Bilgilerini Değiştir...", self)
+        self.kullanici_degistir_action = QAction("Mevcut Kullanıcı Bilgilerini Değiştir", self)
         self.kullanici_degistir_action.triggered.connect(self.kullanici_degistir_dialogu_ac)
         self.yeni_kullanici_action = QAction("Yeni Kullanıcı Ekle...", self)
         self.yeni_kullanici_action.triggered.connect(self.yeni_kullanici_dialogu_ac)
 
         # --- FİREBASE AKSİYONU ---
-        self.firebase_action = QAction("Firebase Senkronizasyon...", self)
+        self.firebase_action = QAction("Firebase Senkronizasyon", self)
         self.firebase_action.triggered.connect(self.firebase_penceresi_ac)
 
-        self.disa_aktar_action = QAction("Verileri CSV Olarak Dışa Aktar...", self)
+        self.disa_aktar_action = QAction("Verileri CSV Olarak Dışa Aktar", self)
         self.disa_aktar_action.triggered.connect(self.ana_stok_sayfasi.verileri_disa_aktar)
 
         self.ornek_veri_action = QAction("Verileri Sıfırla ve Örnek Veri Yükle", self)
