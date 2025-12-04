@@ -40,7 +40,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QDate, QRectF, QSize, QLocale, 
 
 # --- YAPILANDIRMA ---
 FIREBASE_KEY_PATH = "firebase_key.json"
-FIREBASE_DB_URL = "https://stockflow-app-3a413-default-rtdb.europe-west1.firebasedatabase.app/"
+FIREBASE_DB_URL = "https://stockfloww-3cf71-default-rtdb.europe-west1.firebasedatabase.app/"
 DB_NAME = "stok_veritabani.db"
 
 
