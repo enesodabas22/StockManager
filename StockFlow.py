@@ -4,6 +4,7 @@ import sqlite3
 import hashlib
 import csv
 import json
+import math
 from datetime import datetime, date
 
 # --- ÜÇÜNCÜ PARTİ KÜTÜPHANELER ---
@@ -31,7 +32,7 @@ from PyQt6.QtWidgets import (
     QFormLayout, QDialogButtonBox, QAbstractItemView, QFileDialog,
     QMainWindow, QMenuBar, QCheckBox, QHeaderView, QFrame, QStackedWidget,
     QListWidget, QListWidgetItem, QStatusBar, QInputDialog, QComboBox,
-    QProgressBar, QDateEdit
+    QProgressBar, QDateEdit, QGraphicsDropShadowEffect
 )
 from PyQt6.QtGui import QAction, QFont, QColor, QCursor, QPixmap, QDoubleValidator, QPainter, QPen, QBrush, \
     QLinearGradient, QRegularExpressionValidator
@@ -39,7 +40,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QDate, QRectF, QSize, QLocale, 
 
 # --- YAPILANDIRMA ---
 FIREBASE_KEY_PATH = "firebase_key.json"
-FIREBASE_DB_URL = "https://stockflow-app-3a413-default-rtdb.europe-west1.firebasedatabase.app/"
+FIREBASE_DB_URL = "https://stockfloww-3cf71-default-rtdb.europe-west1.firebasedatabase.app/"
 DB_NAME = "stok_veritabani.db"
 
 
@@ -69,7 +70,6 @@ class VeritabaniYoneticisi:
         self.cursor = self.baglanti.cursor()
         self.tablolari_olustur()
         self.veritabani_migrasyonu_kontrol_et()
-
 
     def _sutun_tipi_getir(self, tablo_adi, sutun_adi):
         try:
@@ -112,6 +112,11 @@ class VeritabaniYoneticisi:
             if 'satis_fiyati' not in hareket_sutunlari:
                 self.cursor.execute("ALTER TABLE stok_hareketleri ADD COLUMN satis_fiyati REAL")
 
+            # --- YENİ EKLENEN KISIM: 'resim_yolu' sütunu ---
+            if 'resim_yolu' not in mevcut_sutunlar:
+                self.cursor.execute("ALTER TABLE urunler ADD COLUMN resim_yolu TEXT")
+            # ------------------------------------------
+
             self.baglanti.commit()
         except sqlite3.OperationalError:
             pass
@@ -128,7 +133,8 @@ class VeritabaniYoneticisi:
                 birim TEXT NOT NULL DEFAULT 'adet',
                 min_stok REAL NOT NULL DEFAULT 10,
                 baslangic_miktari REAL,
-                son_kullanma_tarihi TEXT
+                son_kullanma_tarihi TEXT,
+                resim_yolu TEXT
             )""")
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS kullanicilar (
@@ -192,17 +198,16 @@ class VeritabaniYoneticisi:
             self.baglanti.commit()
             return True, f"Mevcut '{urun_kodu}' kodlu ürünün stoğu güncellendi. (SKT Değişmedi)"
         else:
-            self.cursor.execute("SELECT id FROM urunler WHERE ad = ?", (ad,))
-            if self.cursor.fetchone():
-                return False, f"'{ad}' adında bir ürün zaten farklı bir kod ile kayıtlı."
             try:
-                self.cursor.execute(
-                    "INSERT INTO urunler (urun_kodu, ad, kategori, fiyat, miktar, birim, min_stok, baslangic_miktari, son_kullanma_tarihi) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (urun_kodu, ad.upper(), kategori.upper(), fiyat, miktar, birim, min_stok, miktar, skt_tarihi))
+                self.cursor.execute("""
+                    INSERT INTO urunler (urun_kodu, ad, kategori, fiyat, miktar, birim, min_stok, baslangic_miktari, son_kullanma_tarihi, aktif)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """, (urun_kodu, ad.upper(), kategori.upper(), fiyat, miktar, birim, min_stok, miktar, skt_tarihi))
+
                 urun_id = self.cursor.lastrowid
-                self._stok_hareketi_kaydet(urun_id, kullanici_adi, "YENİ ÜRÜN", miktar, miktar, "Yeni kayıt")
+                self._stok_hareketi_kaydet(urun_id, kullanici_adi, "STOK GİRİŞİ", miktar, miktar, "Yeni Ürün Ekleme")
                 self.baglanti.commit()
-                return True, f"Yeni ürün '{ad}' eklendi."
+                return True, "Ürün başarıyla eklendi."
             except sqlite3.IntegrityError:
                 self.baglanti.rollback()
                 return False, f"'{urun_kodu}' ürün kodu başkası tarafından kullanılıyor."
@@ -212,9 +217,11 @@ class VeritabaniYoneticisi:
 
     def urun_detay_guncelle(self, urun_id, yeni_ad, kategori, fiyat, birim, min_stok, yeni_skt, kullanici_adi):
         try:
-            self.cursor.execute(
-                "UPDATE urunler SET ad = ?, kategori = ?, fiyat = ?, birim = ?, min_stok = ?, son_kullanma_tarihi = ? WHERE id = ?",
-                (yeni_ad.upper(), kategori.upper(), fiyat, birim, min_stok, yeni_skt, urun_id))
+            self.cursor.execute("""
+                UPDATE urunler 
+                SET ad = ?, kategori = ?, fiyat = ?, birim = ?, min_stok = ?, son_kullanma_tarihi = ?
+                WHERE id = ?
+            """, (yeni_ad.upper(), kategori.upper(), fiyat, birim, min_stok, yeni_skt, urun_id))
             notlar = f"Detaylar güncellendi (Birim: {birim}, MinStok: {min_stok}, SKT: {yeni_skt})"
             self.cursor.execute("SELECT miktar FROM urunler WHERE id = ?", (urun_id,))
             mevcut_miktar = self.cursor.fetchone()[0]
@@ -269,6 +276,22 @@ class VeritabaniYoneticisi:
         self.cursor.execute("SELECT miktar FROM urunler WHERE id = ?", (urun_id,))
         sonuc = self.cursor.fetchone()
         return sonuc[0] if sonuc else 0
+
+    def tum_kullanicilari_getir(self):
+        """Yedekleme için tüm kullanıcı bilgilerini getirir."""
+        self.cursor.execute("SELECT id, kullanici_adi, sifre_hash FROM kullanicilar")
+        return self.cursor.fetchall()
+
+    def kullanici_yukle_raw(self, u_id, k_adi, s_hash):
+        """Yedekten dönerken kullanıcıyı olduğu gibi (şifreyi tekrar hashlemeden) kaydeder."""
+        try:
+            self.cursor.execute("""
+                INSERT INTO kullanicilar (id, kullanici_adi, sifre_hash) 
+                VALUES (?, ?, ?)
+            """, (u_id, k_adi, s_hash))
+            self.baglanti.commit()
+        except Exception as e:
+            print(f"Kullanıcı yükleme hatası ({k_adi}): {e}")
 
     def urun_hucre_guncelle(self, urun_id, sutun_adi, yeni_deger, kullanici_adi):
         izin_verilen_sutunlar = ['kategori', 'fiyat']
@@ -413,6 +436,8 @@ class VeritabaniYoneticisi:
             return False, "Yeni kullanıcı adı başkası tarafından kullanılıyor."
 
 
+
+
 # =============================================================================
 # 3. DIALOG WINDOWS
 # =============================================================================
@@ -443,7 +468,7 @@ class FirebaseYedekleyici(QDialog):
         baslik.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(baslik)
 
-        info = QLabel("Ürünlerinizi VE satış geçmişinizi bulutla eşitleyin.")
+        info = QLabel("Ürünlerinizi ve satış geçmişinizi bulutla eşitleyin.")
         info.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(info)
 
@@ -503,36 +528,46 @@ class FirebaseYedekleyici(QDialog):
                     "son_kullanma_tarihi": urun[9]
                 }
 
-            # 2. STOK HAREKETLERİNİ (SATIŞLARI) HAZIRLA
+            # 2. STOK HAREKETLERİNİ HAZIRLA
             self.veritabani.cursor.execute("SELECT * FROM stok_hareketleri")
             hareketler = self.veritabani.cursor.fetchall()
             hareketler_export = {}
-
-            # Tablo yapısı: id, urun_id, kullanici, islem, miktar_deg, yeni_mik, tarih, notlar, satis_fiyati
             for h in hareketler:
                 h_id = str(h[0])
-                tarih_str = str(h[6])  # Timestamp'i string yap
+                tarih_str = str(h[6])
                 hareketler_export[h_id] = {
                     "urun_id": h[1], "kullanici_adi": h[2], "islem_tipi": h[3],
                     "miktar_degisimi": h[4], "yeni_miktar": h[5], "tarih": tarih_str,
                     "notlar": h[7], "satis_fiyati": h[8]
                 }
 
+            # --- YENİ EKLENEN KISIM: 3. KULLANICILARI HAZIRLA ---
+            kullanicilar = self.veritabani.tum_kullanicilari_getir()
+            kullanicilar_export = {}
+            for k in kullanicilar:
+                k_id = str(k[0])
+                kullanicilar_export[k_id] = {
+                    "kullanici_adi": k[1],
+                    "sifre_hash": k[2]  # Şifreyi hashli haliyle yedekliyoruz
+                }
+            # ----------------------------------------------------
+
             full_data = {
                 "urunler": urunler_export,
-                "hareketler": hareketler_export
+                "hareketler": hareketler_export,
+                "kullanicilar": kullanicilar_export  # Listeye ekledik
             }
 
             self.status_lbl.setText("Firebase'e yükleniyor...")
             self.progress.setValue(50)
             QApplication.processEvents()
 
-            ref = db.reference('tam_yedek')  # 'stoklar' yerine yeni bir düğüm
+            ref = db.reference('tam_yedek')
             ref.set(full_data)
 
             self.progress.setValue(100)
             self.status_lbl.setText("Yedekleme Başarılı!")
-            QMessageBox.information(self, "Başarılı", "Ürünler ve Satış Geçmişi buluta yüklendi.")
+            QMessageBox.information(self, "Başarılı", "Ürünler, Geçmiş ve Kullanıcılar buluta yüklendi.")
 
         except Exception as e:
             self.status_lbl.setText("Hata oluştu.")
@@ -541,10 +576,18 @@ class FirebaseYedekleyici(QDialog):
     def buluttan_cek(self):
         if not self.baglanti_kur(): return
 
-        onay = QMessageBox.warning(self, "DİKKAT",
-                                   "Buluttan indirmek, MEVCUT VERİLERİ SİLİP üzerine yazacaktır.\nDevam?",
-                                   QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if onay != QMessageBox.StandardButton.Yes: return
+        msg = QMessageBox(self)
+        msg.setWindowTitle("DİKKAT")
+        msg.setText(
+            "Buluttan indirmek, MEVCUT VERİLERİ (Kullanıcılar dahil) SİLİP üzerine yazacaktır.\nDevam etmek istiyor musunuz?")
+        msg.setIcon(QMessageBox.Icon.Warning)
+        btn_evet = msg.addButton("Evet", QMessageBox.ButtonRole.YesRole)
+        btn_hayir = msg.addButton("Hayır", QMessageBox.ButtonRole.NoRole)
+        msg.setDefaultButton(btn_hayir)
+        msg.exec()
+
+        if msg.clickedButton() != btn_evet:
+            return
 
         self.status_lbl.setText("Veriler indiriliyor...")
         self.progress.setValue(20)
@@ -567,10 +610,12 @@ class FirebaseYedekleyici(QDialog):
             # Önce tabloları temizle
             cursor.execute("DELETE FROM stok_hareketleri")
             cursor.execute("DELETE FROM urunler")
+            # --- YENİ EKLENEN KISIM: Kullanıcıları Temizle ---
+            cursor.execute("DELETE FROM kullanicilar")
+            # -----------------------------------------------
 
             # 1. ÜRÜNLERİ GERİ YÜKLE
             urunler_data = snapshot.get('urunler', {})
-            # Veri list mi dict mi kontrolü (Firebase bazen liste döndürür)
             iterable_urun = enumerate(urunler_data) if isinstance(urunler_data, list) else urunler_data.items()
 
             for key, val in iterable_urun:
@@ -602,11 +647,22 @@ class FirebaseYedekleyici(QDialog):
                     val.get('tarih'), val.get('notlar'), val.get('satis_fiyati')
                 ))
 
+            # --- YENİ EKLENEN KISIM: 3. KULLANICILARI GERİ YÜKLE ---
+            kullanici_data = snapshot.get('kullanicilar', {})
+            iterable_kul = enumerate(kullanici_data) if isinstance(kullanici_data, list) else kullanici_data.items()
+
+            for key, val in iterable_kul:
+                if val is None: continue
+                k_id = int(key) if isinstance(kullanici_data, dict) else val.get('id', key)
+                # Yeni yazdığımız ham veri yükleme metodunu kullanıyoruz
+                self.veritabani.kullanici_yukle_raw(k_id, val.get('kullanici_adi'), val.get('sifre_hash'))
+            # -------------------------------------------------------
+
             self.veritabani.baglanti.commit()
 
             self.progress.setValue(100)
             self.status_lbl.setText("Tamamlandı!")
-            QMessageBox.information(self, "Başarılı", "Tüm veriler başarıyla geri yüklendi.")
+            QMessageBox.information(self, "Başarılı", "Tüm veriler (Kullanıcılar dahil) başarıyla geri yüklendi.")
 
         except Exception as e:
             self.veritabani.baglanti.rollback()
@@ -631,18 +687,14 @@ class SatisDialog(QDialog):
         self.lbl_alis.setStyleSheet("color: #64748b; font-size: 11px;")
         layout.addRow(self.lbl_alis)
 
-        # --- GÜNCELLEME: QDoubleValidator yerine QRegularExpressionValidator ---
-        # Bu regex: [Rakamlar] (opsiyonel nokta veya virgül) [Rakamlar] yapısına izin verir.
-        regex = QRegularExpression("[0-9]+([.,][0-9]+)?")
-
         self.input_miktar = QLineEdit()
         self.input_miktar.setPlaceholderText("Miktar girin...")
-        self.input_miktar.setValidator(QRegularExpressionValidator(regex))
+        self.input_miktar.setValidator(QDoubleValidator(0.0, 999999.0, 2))
         layout.addRow("Satılacak Miktar:", self.input_miktar)
 
         self.input_fiyat = QLineEdit(str(guncel_alis_fiyati))
         self.input_fiyat.setPlaceholderText("Birim satış fiyatı...")
-        self.input_fiyat.setValidator(QRegularExpressionValidator(regex))
+        self.input_fiyat.setValidator(QDoubleValidator(0.0, 999999.0, 2))
         layout.addRow("Birim Satış Fiyatı (₺):", self.input_fiyat)
 
         # --- BUTONLARI TÜRKÇELEŞTİRME KISMI ---
@@ -659,7 +711,6 @@ class SatisDialog(QDialog):
 
     def get_values(self):
         try:
-            # Kullanıcı virgül girse bile nokta ile değiştirip float yapıyoruz
             miktar_text = self.input_miktar.text().replace(',', '.')
             fiyat_text = self.input_fiyat.text().replace(',', '.')
             if not miktar_text: return None, None
@@ -708,14 +759,10 @@ class UrunDuzenlemeDialog(QDialog):
         self.form_layout.addRow("Min. Stok:", self.min_stok_input)
         self.form_layout.addRow("Son Kul. Tarihi:", self.skt_input)
 
-        # --- GÜNCELLEME: Esnek Validator ---
-        regex = QRegularExpression("[0-9]+([.,][0-9]+)?")
-        validator = QRegularExpressionValidator(regex)
-
-        self.fiyat_input.setValidator(validator)
-        self.min_stok_input.setValidator(validator)
-        # -----------------------------------
-
+        float_validator = QDoubleValidator()
+        float_validator.setBottom(0.0)
+        self.fiyat_input.setValidator(float_validator)
+        self.min_stok_input.setValidator(float_validator)
         self.buttonBox = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.buttonBox.button(QDialogButtonBox.StandardButton.Cancel).setText("İptal Et")
         self.buttonBox.button(QDialogButtonBox.StandardButton.Ok).setText("Kaydet")
@@ -851,17 +898,12 @@ class FiltreDialog(QDialog):
         stok_layout.addWidget(QLabel("-"))
         stok_layout.addWidget(self.max_stok)
         layout.addRow("Stok Aralığı:", stok_layout)
-
-        # --- GÜNCELLEME: Esnek Validator ---
-        regex = QRegularExpression("[0-9]+([.,][0-9]+)?")
-        validator = QRegularExpressionValidator(regex)
-
-        self.min_fiyat.setValidator(validator)
-        self.max_fiyat.setValidator(validator)
-        self.min_stok.setValidator(validator)
-        self.max_stok.setValidator(validator)
-        # -----------------------------------
-
+        float_validator = QDoubleValidator()
+        float_validator.setBottom(0.0)
+        self.min_fiyat.setValidator(float_validator)
+        self.max_fiyat.setValidator(float_validator)
+        self.min_stok.setValidator(float_validator)
+        self.max_stok.setValidator(float_validator)
         self.sadece_dusuk_stok = QCheckBox("Sadece düşük stoktakileri göster")
         self.sadece_dusuk_stok.setChecked(mevcut_filtreler.get("dusuk_stok_only", False))
         layout.addRow("", self.sadece_dusuk_stok)
@@ -958,6 +1000,7 @@ class KarZararSayfasi(QWidget):
         self.tablo.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tablo.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.tablo.setSortingEnabled(True)
+        self.tablo.verticalHeader().setVisible(False)
         layout.addWidget(self.tablo)
         layout.addWidget(
             QLabel("Kâr Hesabı: (Satış Anındaki Fiyat - Güncel Alış Fiyatı) x Adet formülü ile hesaplanır."))
@@ -1030,6 +1073,7 @@ class SatisRaporuSayfasi(QWidget):
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         self.tablo.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tablo.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tablo.verticalHeader().setVisible(False)
         layout.addWidget(self.tablo)
         info_lbl = QLabel("Not: Bu rapor sadece 'Stok Çıkışı' işlemlerini satış olarak kabul eder.")
         info_lbl.setStyleSheet("color: #64748b; font-style: italic;")
@@ -1094,6 +1138,7 @@ class DusukStokSayfasi(QWidget):
         self.stok_tablosu.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.stok_tablosu.setSortingEnabled(True)
         self.stok_tablosu.sortByColumn(2, Qt.SortOrder.AscendingOrder)
+        self.stok_tablosu.verticalHeader().setVisible(False)
         ana_duzen.addWidget(self.stok_tablosu, 1)
 
     def stogu_guncelle(self):
@@ -1182,6 +1227,7 @@ class StokHareketSayfasi(QWidget):
         self.rapor_tablosu.sortByColumn(0, Qt.SortOrder.DescendingOrder)
         self.rapor_tablosu.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.rapor_tablosu.customContextMenuRequested.connect(self.menu_goster)
+        self.rapor_tablosu.verticalHeader().setVisible(False)
         ana_duzen.addWidget(self.rapor_tablosu, 1)
         info_label = QLabel("Bir işlemi geri almak için satıra sağ tıklayın.")
         info_label.setStyleSheet("color: #64748b; font-style: italic;")
@@ -1252,19 +1298,16 @@ class StokHareketSayfasi(QWidget):
         menu.exec(self.rapor_tablosu.viewport().mapToGlobal(pos))
 
     def hareketi_geri_al(self, hareket_id):
-        # --- GÜNCELLEME: Türkçe Butonlu Onay Kutusu ---
         msg = QMessageBox(self)
         msg.setWindowTitle("Geri Alma Onayı")
         msg.setText("Bu işlemi geri almak istediğinize emin misiniz?\nStok miktarı işlem öncesine döndürülecek.")
         msg.setIcon(QMessageBox.Icon.Question)
 
-        # Butonları Türkçe olarak ekliyoruz
+        # Butonları Türkçe ekliyoruz
         btn_evet = msg.addButton("Evet", QMessageBox.ButtonRole.YesRole)
         btn_hayir = msg.addButton("Hayır", QMessageBox.ButtonRole.NoRole)
 
-        # Varsayılan olarak Hayır seçili olsun (Güvenlik için)
-        msg.setDefaultButton(btn_hayir)
-
+        msg.setDefaultButton(btn_hayir)  # Yanlışlıkla basılmasın diye varsayılan 'Hayır'
         msg.exec()
 
         if msg.clickedButton() == btn_evet:
@@ -1283,12 +1326,9 @@ class AnaStokSayfasi(QWidget):
         self.status_bar = status_bar
         self.kullanici_adi = kullanici_adi
         self.guncel_filtreler = {}
-
-        # --- GÜNCELLEME: Global Esnek Regex Validator ---
-        regex = QRegularExpression("[0-9]+([.,][0-9]+)?")
-        self.decimal_validator = QRegularExpressionValidator(regex)
-        # -----------------------------------------------
-
+        self.float_validator = QDoubleValidator()
+        self.float_validator.setBottom(0.0)
+        self.float_validator.setNotation(QDoubleValidator.Notation.StandardNotation)
         self.arayuz_olustur()
         self.stogu_guncelle_arayuz()
 
@@ -1360,23 +1400,23 @@ class AnaStokSayfasi(QWidget):
         ekleme_duzen = QFormLayout(self.ekleme_formu_frame)
         self.yeni_urun_kodu_input = QLineEdit()
         # self.yeni_urun_kodu_input.setInputMask("0000000000000") # KALDIRILDI: NumLock sorununa neden olabiliyor
-        self.yeni_urun_kodu_input.setMaxLength(13)
-        self.yeni_urun_kodu_input.setValidator(QRegularExpressionValidator(QRegularExpression("\\d{13}")))
-        self.yeni_urun_kodu_input.setPlaceholderText("13 Haneli Kod")
+        self.yeni_urun_kodu_input.setMaxLength(3)
+        self.yeni_urun_kodu_input.setValidator(QRegularExpressionValidator(QRegularExpression("\\d{3}")))
+        self.yeni_urun_kodu_input.setPlaceholderText("3 Haneli Kod")
         self.yeni_urun_input = QLineEdit()
         self.yeni_kategori_input = QLineEdit()
         self.yeni_fiyat_input = QLineEdit()
-        self.yeni_fiyat_input.setValidator(self.decimal_validator)
+        self.yeni_fiyat_input.setValidator(self.float_validator)
         miktar_layout = QHBoxLayout()
         self.yeni_miktar_input = QLineEdit()
-        self.yeni_miktar_input.setValidator(self.decimal_validator)
+        self.yeni_miktar_input.setValidator(self.float_validator)
         self.yeni_birim_input = QComboBox()
-        self.yeni_birim_input.addItems(["adet", "kg", "litre", "paket", "kutu", "palet"])
+        self.yeni_birim_input.addItems(["    adet", "    kg", "    litre", "    paket", "    kutu", "    palet"])
         self.yeni_birim_input.setFixedWidth(100)
         miktar_layout.addWidget(self.yeni_miktar_input, 1)
         miktar_layout.addWidget(self.yeni_birim_input)
         self.yeni_min_stok_input = QLineEdit("10")
-        self.yeni_min_stok_input.setValidator(self.decimal_validator)
+        self.yeni_min_stok_input.setValidator(self.float_validator)
         self.yeni_skt_input = QDateEdit()
         self.yeni_skt_input.setCalendarPopup(True)
         self.yeni_skt_input.setDate(QDate.currentDate().addYears(1))
@@ -1396,6 +1436,7 @@ class AnaStokSayfasi(QWidget):
         self.ekleme_formu_frame.hide()
         ana_duzen.addWidget(self.ekleme_formu_frame)
         self.onayla_ekle_btn.clicked.connect(self.yeni_urun_ekle)
+        # Tablo
         self.stok_tablosu = QTableWidget()
         self.stok_tablosu.setObjectName("stokTablosu")
         self.stok_tablosu.setColumnCount(10)
@@ -1419,6 +1460,7 @@ class AnaStokSayfasi(QWidget):
         self.stok_tablosu.itemChanged.connect(self.hucre_degisikligini_kaydet)
         self.stok_tablosu.setSortingEnabled(True)
         self.stok_tablosu.sortByColumn(2, Qt.SortOrder.AscendingOrder)
+        self.stok_tablosu.verticalHeader().setVisible(False)
         ana_duzen.addWidget(self.stok_tablosu, 1)
 
     def guncelle_dashboard(self):
@@ -1440,6 +1482,7 @@ class AnaStokSayfasi(QWidget):
         self.stok_tablosu.setRowCount(0)
         if urun_listesi is None: urun_listesi = self.veritabani.urunleri_getir()
         bugun = date.today()
+        self.stok_tablosu.setRowCount(len(urun_listesi))
         self.stok_tablosu.setRowCount(len(urun_listesi))
         for satir, (id_val, urun_kodu, ad, kategori, fiyat, miktar, birim, min_stok, baslangic_miktari,
                     son_kullanma_tarihi) in enumerate(urun_listesi):
@@ -1530,7 +1573,14 @@ class AnaStokSayfasi(QWidget):
             btn_layout.setContentsMargins(0, 0, 0, 0)
             btn_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
             btn_layout.addWidget(menu_btn)
+            btn_layout.addWidget(menu_btn)
             self.stok_tablosu.setCellWidget(satir, 9, btn_container)
+
+            # Satır yüksekliğini ayarla (Resim için biraz daha yüksek)
+            self.stok_tablosu.setRowHeight(satir, 40)
+
+            # Satır yüksekliğini ayarla (Resim için biraz daha yüksek)
+            self.stok_tablosu.setRowHeight(satir, 50)
         self.stok_tablosu.resizeRowsToContents()
         self.stok_tablosu.setSortingEnabled(True)
         self.tabloyu_filtrele()
@@ -1573,8 +1623,8 @@ class AnaStokSayfasi(QWidget):
 
     def yeni_urun_ekle(self):
         kod = self.yeni_urun_kodu_input.text()
-        if len(kod) != 13:
-            QMessageBox.warning(self, "Uyarı", "Ürün Kodu 13 haneli olmalıdır.")
+        if len(kod) != 3:
+            QMessageBox.warning(self, "Uyarı", "Ürün Kodu 3 haneli olmalıdır.")
             return
         ad = self.yeni_urun_input.text().strip().upper()
         kat = self.yeni_kategori_input.text().strip().upper()
@@ -1753,7 +1803,6 @@ class AnaStokSayfasi(QWidget):
                                                                 self.kullanici_adi)
         elif sutun == 4:
             try:
-                # --- Fiyat güncelleme kısmında da virgül/nokta değişimi yapıyoruz ---
                 yeni_fiyat = float(yeni_deger_str.replace('₺', '').replace(',', '.').strip())
                 if yeni_fiyat < 0: raise ValueError("Fiyat negatif olamaz")
                 basari, mesaj = self.veritabani.urun_hucre_guncelle(urun_id, "fiyat", yeni_fiyat, self.kullanici_adi)
@@ -1780,6 +1829,7 @@ class SimpleChartWidget(QWidget):
     Basit grafikler çizen özel widget.
     Matplotlib bağımlılığı olmadan çalışır.
     """
+    clicked = pyqtSignal()
 
     def __init__(self, chart_type="line", data=None, title="", parent=None):
         super().__init__(parent)
@@ -1788,6 +1838,11 @@ class SimpleChartWidget(QWidget):
         self.title = title
         self.setMinimumHeight(250)
         self.setStyleSheet("background-color: transparent;")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        self.clicked.emit()
+        super().mousePressEvent(event)
 
     def paintEvent(self, event):
         try:
@@ -1819,6 +1874,8 @@ class SimpleChartWidget(QWidget):
                 self.draw_line_chart(painter, chart_rect)
             elif self.chart_type == "bar":
                 self.draw_bar_chart(painter, chart_rect)
+            elif self.chart_type == "pie":
+                self.draw_pie_chart(painter, chart_rect)
         except Exception as e:
             print(f"Paint Error: {e}")
             # Hata durumunda boş geç, çökme
@@ -1900,6 +1957,127 @@ class SimpleChartWidget(QWidget):
                              Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
                              str(keys[i]))
 
+    def draw_pie_chart(self, painter, rect):
+        values = list(self.data.values())
+        keys = list(self.data.keys())
+        if not values: return
+
+        total = sum(values)
+        if total == 0: return
+
+        start_angle = 0
+        colors = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899", "#6366f1"]
+
+        # Kare bir alan belirle (grafik düzgün dursun)
+        size = min(rect.width(), rect.height())
+        pie_rect = QRectF(rect.center().x() - size / 2, rect.center().y() - size / 2, size, size)
+
+        for i, val in enumerate(values):
+            span_angle = (val / total) * 360 * 16  # 16 ile çarpım Qt açısı için gerekli
+
+            color = QColor(colors[i % len(colors)])
+            painter.setBrush(QBrush(color))
+            painter.setPen(Qt.PenStyle.NoPen)
+
+            painter.drawPie(pie_rect, int(start_angle), int(span_angle))
+
+            # Legend (Basit)
+            # Dilim ortasına yazı yazmak karmaşık, sağ tarafa legend ekleyelim mi?
+            # Şimdilik basitçe dilimlerin üzerine değil, yanına çizelim.
+            # Ama SimpleChartWidget yapısı gereği rect içinde kalmalı.
+
+            painter.drawPie(pie_rect, int(start_angle), int(span_angle))
+
+            # --- Etiket Çizimi (YENİ) ---
+            # Sadece %5'ten büyük dilimlere yazı yazalım, karmaşayı önlemek için
+            percentage = val / total
+            if percentage > 0.05:
+                # Açıyı radyana çevir
+                # start_angle ve span_angle 1/16 derece cinsinden
+                mid_angle_deg = (start_angle / 16) + (span_angle / 16) / 2
+                mid_angle_rad = math.radians(mid_angle_deg)
+
+                # Yazının konumu (Merkezden yarıçapın %70'i kadar uzakta)
+                radius = size / 2 * 0.7
+                # Qt koordinat sistemi: Y aşağı artar, açılar saat yönünün tersine
+                # 0 derece saat 3 yönünde.
+                tx = pie_rect.center().x() + radius * math.cos(mid_angle_rad)
+                ty = pie_rect.center().y() - radius * math.sin(mid_angle_rad)
+
+                # Yazıyı çiz
+                painter.setPen(QColor("white"))
+                painter.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+
+                label_text = f"{keys[i]}\n%{int(percentage * 100)}"
+
+                # Metni ortalayarak çiz
+                text_rect = QRectF(tx - 40, ty - 20, 80, 40)
+                painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, label_text)
+
+            start_angle += span_angle
+
+
+class ChartDetailDialog(QDialog):
+    def __init__(self, chart_type, title, data, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Detay: {title}")
+        self.setMinimumSize(900, 600)
+        self.setStyleSheet("background-color: #0f172a; color: #e2e8f0;")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(20)
+
+        # Başlık
+        header = QLabel(title)
+        header.setStyleSheet("font-size: 24px; font-weight: bold; color: #f8fafc;")
+        layout.addWidget(header)
+
+        # Grafik (Büyük)
+        chart_frame = QFrame()
+        chart_frame.setStyleSheet("background-color: #1e293b; border-radius: 12px; border: 1px solid #334155;")
+        chart_layout = QVBoxLayout(chart_frame)
+        self.chart = SimpleChartWidget(chart_type, data, "")  # Başlık zaten yukarıda
+        self.chart.setMinimumHeight(400)
+        chart_layout.addWidget(self.chart)
+        layout.addWidget(chart_frame, 2)
+
+        # Veri Tablosu
+        self.table = QTableWidget()
+        self.table.setColumnCount(2)
+        self.table.setHorizontalHeaderLabels(["Etiket", "Değer"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setStyleSheet("""
+            QTableWidget { background-color: #1e293b; border: 1px solid #334155; border-radius: 8px; }
+            QHeaderView::section { background-color: #0f172a; color: #94a3b8; border: none; padding: 8px; }
+            QTableWidget::item { padding: 8px; border-bottom: 1px solid #334155; }
+            QScrollBar:vertical { border: none; background: #0f172a; width: 10px; margin: 0; }
+            QScrollBar::handle:vertical { background: #334155; min-height: 20px; border-radius: 5px; }
+            QScrollBar::handle:vertical:hover { background: #475569; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+        """)
+
+        # Verileri doldur
+        row = 0
+        for k, v in data.items():
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(str(k)))
+
+            val_str = f"{v:,.2f}" if isinstance(v, float) else str(v)
+            self.table.setItem(row, 1, QTableWidgetItem(val_str))
+            row += 1
+
+        layout.addWidget(self.table, 1)
+
+        # Kapat Butonu
+        btn_close = QPushButton("Kapat")
+        btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_close.setStyleSheet(
+            "background-color: #ef4444; color: white; padding: 10px; border-radius: 6px; font-weight: bold;")
+        btn_close.clicked.connect(self.close)
+        layout.addWidget(btn_close, alignment=Qt.AlignmentFlag.AlignRight)
+
 
 class DashboardPage(QWidget):
     def __init__(self, veritabani_yoneticisi, parent=None):
@@ -1926,20 +2104,35 @@ class DashboardPage(QWidget):
         cards_layout.addWidget(self.card_monthly_sales)
         layout.addLayout(cards_layout)
 
-        # --- Grafikler ---
+        # --- Grafikler (Üst Satır) ---
         charts_layout = QHBoxLayout()
 
-        # Sol Grafik: Satış Trendi (Son 7 Gün)
-        self.sales_chart = SimpleChartWidget("line", title="Son 7 Günlük Satış Trendi")
-        self.sales_chart_frame = self.wrap_chart(self.sales_chart)
-        charts_layout.addWidget(self.sales_chart_frame, 2)
-
-        # Sağ Grafik: Kategori Dağılımı (En çok stok tutan 5 kategori)
+        # Sol: Kategori Dağılımı (Bar)
         self.category_chart = SimpleChartWidget("bar", title="Stok Dağılımı (Adet)")
         self.category_chart_frame = self.wrap_chart(self.category_chart)
         charts_layout.addWidget(self.category_chart_frame, 1)
 
-        layout.addLayout(charts_layout, 1)
+        # Sağ: Kategori Bazlı Değer (Pasta)
+        self.value_chart = SimpleChartWidget("pie", title="Kategori Bazlı Stok Değeri")
+        self.value_chart_frame = self.wrap_chart(self.value_chart)
+        charts_layout.addWidget(self.value_chart_frame, 1)
+
+        layout.addLayout(charts_layout, 2)
+
+        # --- Alt Grafikler (Alt Satır) ---
+        bottom_charts_layout = QHBoxLayout()
+
+        # Alt: Satış Trendi (Line)
+        self.sales_chart = SimpleChartWidget("line", title="Son 7 Günlük Satış Trendi")
+        self.sales_chart_frame = self.wrap_chart(self.sales_chart)
+        bottom_charts_layout.addWidget(self.sales_chart_frame)
+
+        layout.addLayout(bottom_charts_layout, 2)
+
+        # --- Sinyal Bağlantıları ---
+        self.sales_chart.clicked.connect(lambda: self.open_chart_detail(self.sales_chart))
+        self.category_chart.clicked.connect(lambda: self.open_chart_detail(self.category_chart))
+        self.value_chart.clicked.connect(lambda: self.open_chart_detail(self.value_chart))
 
         # --- Alt Bilgi ---
         refresh_btn = QPushButton("Verileri Yenile")
@@ -1959,16 +2152,35 @@ class DashboardPage(QWidget):
         l.addWidget(title_lbl)
         l.addWidget(val_lbl)
         frame.val_lbl = val_lbl  # Referans tut
+
+        # Gölge Efekti
+        self.add_shadow(frame)
+
         return frame
+
+    def add_shadow(self, widget):
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(20)
+        shadow.setXOffset(0)
+        shadow.setYOffset(4)
+        shadow.setColor(QColor(0, 0, 0, 80))
+        widget.setGraphicsEffect(shadow)
 
     def wrap_chart(self, chart_widget):
         frame = QFrame()
         frame.setObjectName("chartCard")
-        frame.setStyleSheet(
-            "QFrame#chartCard { background-color: #1e293b; border-radius: 12px; border: 1px solid #334155; }")
+        # Inline style removed, now using global STYLESHEET
         l = QVBoxLayout(frame)
         l.addWidget(chart_widget)
+
+        # Gölge Efekti
+        self.add_shadow(frame)
+
         return frame
+
+    def open_chart_detail(self, chart_widget):
+        dialog = ChartDetailDialog(chart_widget.chart_type, chart_widget.title, chart_widget.data, self)
+        dialog.exec()
 
     def refresh_data(self):
         try:
@@ -2012,10 +2224,28 @@ class DashboardPage(QWidget):
                 for c in cats:
                     cat_name = c[0] if c[0] else "Diğer"
                     cat_qty = c[1] if c[1] else 0
-                    cat_data[cat_name] = cat_qty
+                    if cat_qty > 0:  # Sadece 0'dan büyükleri ekle
+                        cat_data[cat_name] = cat_qty
 
             self.category_chart.data = cat_data
             self.category_chart.update()
+
+            # Kategori Bazlı Değer (Pie Chart)
+            cursor.execute(
+                "SELECT kategori, SUM(miktar * fiyat) FROM urunler GROUP BY kategori ORDER BY SUM(miktar * fiyat) DESC LIMIT 5")
+            val_cats = cursor.fetchall()
+            val_data = {}
+            if val_cats:
+                for c in val_cats:
+                    cat_name = c[0] if c[0] else "Diğer"
+                    cat_val = c[1] if c[1] else 0
+                    if cat_val > 0:  # Sadece 0'dan büyükleri ekle
+                        val_data[cat_name] = cat_val
+
+            self.value_chart.data = val_data
+            self.value_chart.update()
+
+
 
         except Exception as e:
             print(f"Dashboard refresh error: {e}")
@@ -2029,6 +2259,8 @@ class DashboardPage(QWidget):
 # =============================================================================
 
 class AnaPencere(QMainWindow):
+    cikis_istendi = pyqtSignal()
+
     def __init__(self, kullanici_adi, veritabani_yoneticisi):
         super().__init__()
         self.kullanici_adi = kullanici_adi
@@ -2071,7 +2303,7 @@ class AnaPencere(QMainWindow):
         logo_layout.addWidget(logo_icon)
         logo_layout.addStretch()
 
-        # --- Navigasyon Listesi ---
+        # --- Navigasyon Listesi (Değişiklik Burada) ---
         self.nav_list = QListWidget()
         self.nav_list.setObjectName("sidebarNav")
 
@@ -2084,9 +2316,14 @@ class AnaPencere(QMainWindow):
         self.nav_list.addItem(QListWidgetItem("Satışlar"))
 
         # --- YENİ EKLENEN AYARLAR ---
+        # 1. Dikey kaydırma çubuğunu tamamen kapatıyoruz
         self.nav_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # 2. Yatay kaydırma çubuğunu kapatıyoruz
         self.nav_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # 3. Listenin tüm öğeleri alacak kadar yüksek olmasını sağlıyoruz (Piksell cinsinden)
+        # 6 öğe var, CSS paddingleri ile yaklaşık 350-400px yeterli olacaktır.
         self.nav_list.setMinimumHeight(400)
+        # 4. Seçim yapıldığında mavi çerçevenin çıkmasını engellemek için (görsel iyileştirme)
         self.nav_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         # ----------------------------
 
@@ -2106,8 +2343,9 @@ class AnaPencere(QMainWindow):
 
         self.main_layout.addWidget(self.sidebar)
 
-        # --- Header ve Content ---
+        # --- Buradan sonrası aynı (Header ve Content) ---
         content_container = QFrame()
+        # ... (kodun geri kalanı aynı) ...
         content_container.setObjectName("contentContainer")
         content_layout = QVBoxLayout(content_container)
         content_layout.setContentsMargins(0, 0, 0, 0)
@@ -2159,19 +2397,23 @@ class AnaPencere(QMainWindow):
 
     def init_menu_actions(self):
         self.ayarlar_menu = QMenu(self)
-        self.kullanici_degistir_action = QAction("Mevcut Kullanıcı Bilgilerini Değiştir...", self)
+
+    def init_menu_actions(self):
+        self.ayarlar_menu = QMenu(self)
+        self.kullanici_degistir_action = QAction("Mevcut Kullanıcı Bilgilerini Değiştir", self)
         self.kullanici_degistir_action.triggered.connect(self.kullanici_degistir_dialogu_ac)
-        self.yeni_kullanici_action = QAction("Yeni Kullanıcı Ekle...", self)
+        self.yeni_kullanici_action = QAction("Yeni Kullanıcı Ekle", self)
         self.yeni_kullanici_action.triggered.connect(self.yeni_kullanici_dialogu_ac)
 
         # --- FİREBASE AKSİYONU ---
-        self.firebase_action = QAction("Firebase Senkronizasyon...", self)
+        self.firebase_action = QAction("Firebase Senkronizasyon", self)
         self.firebase_action.triggered.connect(self.firebase_penceresi_ac)
 
-        self.disa_aktar_action = QAction("Verileri CSV Olarak Dışa Aktar...", self)
+        self.disa_aktar_action = QAction("Verileri CSV Olarak Dışa Aktar", self)
         self.disa_aktar_action.triggered.connect(self.ana_stok_sayfasi.verileri_disa_aktar)
+
         self.cikis_action = QAction("Çıkış Yap", self)
-        self.cikis_action.triggered.connect(self.close)
+        self.cikis_action.triggered.connect(self.oturumu_kapat)
 
         self.ayarlar_menu.addAction(self.kullanici_degistir_action)
         self.ayarlar_menu.addAction(self.yeni_kullanici_action)
@@ -2180,6 +2422,12 @@ class AnaPencere(QMainWindow):
         self.ayarlar_menu.addAction(self.disa_aktar_action)
         self.ayarlar_menu.addSeparator()
         self.ayarlar_menu.addAction(self.cikis_action)
+
+    def oturumu_kapat(self):
+        """Sinyal gönderir ve pencereyi kapatır."""
+        self.cikis_istendi.emit()  # Kontrolcüye haber ver
+        self.close()
+
 
     def ayarlar_menu_goster(self):
         self.ayarlar_menu.exec(self.ayarlar_btn.mapToGlobal(QPoint(0, self.ayarlar_btn.height())))
@@ -2202,10 +2450,13 @@ class AnaPencere(QMainWindow):
         self.nav_list.setCurrentRow(self.onceki_sayfa_index)
 
     def sayfa_degisti(self, index):
-        mevcut_index = self.stacked_widget.currentIndex()
-        if mevcut_index != index: self.onceki_sayfa_index = mevcut_index
         self.stacked_widget.setCurrentIndex(index)
-        self.sayfa_basligi.setText(self.nav_list.item(index).text().strip())
+        basliklar = ["Genel Bakış", "Ana Stok Listesi", "Düşük Stok Uyarıları", "Stok Hareketleri", "En Çok Satanlar",
+                     "Satış Raporu"]
+        if 0 <= index < len(basliklar):
+            self.sayfa_basligi.setText(basliklar[index])
+
+        # Sayfa değiştiğinde verileri yenile
         if index == 0:
             self.dashboard_sayfasi.refresh_data()
         elif index == 1:
@@ -2218,6 +2469,15 @@ class AnaPencere(QMainWindow):
             self.satis_raporu_sayfasi.raporu_guncelle()
         elif index == 5:
             self.kar_zarar_sayfasi.raporu_guncelle()
+
+    def hizli_urun_ekle(self):
+        # Önce stok sayfasına git, sonra ekleme dialogunu aç
+        self.nav_list.setCurrentRow(1)  # Stok Sayfası
+        # Biraz bekleyip butona tıklama efekti yaratabiliriz veya direkt fonksiyonu çağırabiliriz
+        # AnaStokSayfasi içindeki yeni_urun_ekle metodunu public yapıp çağıralım.
+        # Ancak AnaStokSayfasi'nda bu metod zaten var ama butona bağlı.
+        # Biz direkt dialogu açalım.
+        self.ana_stok_sayfasi.yeni_urun_ekle()
 
 
 # =============================================================================
@@ -2450,6 +2710,7 @@ class AnaKontrolcu:
     def ana_pencereyi_goster(self, kullanici_adi):
         try:
             self.ana_pencere = AnaPencere(kullanici_adi, self.veritabani)
+            self.ana_pencere.cikis_istendi.connect(self.oturum_kapat_ve_giris_yap)
             self.ana_pencere.showMaximized()
             self.bildirim_gonder_kontrolu()
             if self.mevcut_pencere: self.mevcut_pencere.close()
@@ -2465,6 +2726,14 @@ class AnaKontrolcu:
             traceback.print_exc()
             QMessageBox.critical(None, "Kritik Hata", f"Ana pencere açılırken bir hata oluştu:\n{str(e)}")
             print(f"HATA: {e}")
+            pass
+
+    def oturum_kapat_ve_giris_yap(self):
+        """Ana pencere kapandığında giriş ekranını tekrar açar."""
+        # Ana pencere zaten kapanıyor ama referansı temizleyelim
+        self.ana_pencere = None
+        # Giriş ekranını tekrar çağır
+        self.login_penceresini_goster()
 
     def degistirme_penceresini_goster(self):
         if self.login_penceresi and self.login_penceresi.isVisible(): self.login_penceresi.hide()
@@ -2496,8 +2765,6 @@ class AnaKontrolcu:
             print(f"Bildirim hatası: {e}")
 
 
-
-
 # =============================================================================
 # 8. STYLESHEET AND EXECUTION
 # =============================================================================
@@ -2512,16 +2779,16 @@ STYLESHEET = """
     QDialog, QWidget#authWindow { background-color: #1e293b; border: 1px solid #334155; border-radius: 8px; }
     QMessageBox { background-color: #1e293b; color: #e2e8f0; }
 
-    /* Sidebar */
-    QFrame#sidebarFrame { background-color: #1e293b; border-right: 1px solid #334155; }
-    QFrame#sidebarFrame QLabel { color: #94a3b8; font-size: 11px; font-weight: 700; text-transform: uppercase; padding-left: 12px; padding-top: 20px; letter-spacing: 0.5px; }
+    /* Sidebar - LIGHTER SHADE REQUESTED */
+    QFrame#sidebarFrame { background-color: #334155; border-right: 1px solid #475569; }
+    QFrame#sidebarFrame QLabel { color: #cbd5e1; font-size: 11px; font-weight: 700; text-transform: uppercase; padding-left: 12px; padding-top: 20px; letter-spacing: 0.5px; }
     QLabel#logoIcon { qproperty-alignment: 'AlignCenter'; min-height: 50px; padding: 10px; margin: 0; }
     QLabel#logoText { font-size: 22px; font-weight: 800; color: #f8fafc; padding: 0; letter-spacing: 0.5px; }
 
     /* Navigation List */
     QListWidget#sidebarNav { border: none; background: transparent; outline: none; margin-top: 10px; }
     QListWidget#sidebarNav::item { padding: 12px 16px; border-radius: 8px; color: #cbd5e1; font-weight: 500; margin: 4px 12px; transition: all 0.2s; }
-    QListWidget#sidebarNav::item:hover { background-color: #334155; color: #f1f5f9; }
+    QListWidget#sidebarNav::item:hover { background-color: #475569; color: #f1f5f9; }
     QListWidget#sidebarNav::item:selected { background-color: #2563eb; color: #ffffff; font-weight: 600; border-left: 4px solid #60a5fa; }
 
     /* Buttons */
@@ -2538,7 +2805,7 @@ STYLESHEET = """
     QPushButton#filterBtn:hover { background: #334155; border-color: #475569; }
     QPushButton#filterBtn[filtered="true"] { background: #3b82f6; color: white; border: none; }
 
-    QPushButton#yeniUrunBtn { background: #10b981; }
+    QPushButton#yeniUrunBtn { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #10b981, stop:1 #059669); }
     QPushButton#yeniUrunBtn:hover { background: #059669; }
 
     QPushButton#menuButton { background: transparent; border: 1px solid transparent; border-radius: 4px; font-weight: 900; font-size: 18px; color: #94a3b8; padding: 0px 8px; margin: 0; line-height: 10px; }
@@ -2553,9 +2820,19 @@ STYLESHEET = """
     QLabel#pageTitle { font-size: 24px; font-weight: 700; color: #f1f5f9; padding: 0; }
     QLabel#pageSubtitle { font-size: 14px; color: #94a3b8; }
 
-    /* Cards */
-    QFrame#metricCard { background-color: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 20px; }
-    QFrame#metricCard:hover { border-color: #475569; background-color: #252f45; }
+    /* Cards - Modern Gradient */
+    QFrame#metricCard {
+        background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1e293b, stop:1 #0f172a);
+        border: 1px solid #334155;
+        border-radius: 12px;
+        padding: 20px;
+    }
+    /* Hover removed for metricCard as requested */
+
+    /* Chart Cards - Clickable */
+    QFrame#chartCard { background-color: #1e293b; border-radius: 12px; border: 1px solid #334155; }
+    QFrame#chartCard:hover { border-color: #60a5fa; background-color: #252f45; cursor: pointer; }
+
     QLabel#metricTitle { font-size: 12px; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
     QLabel#metricValue { font-size: 28px; font-weight: 700; color: #f1f5f9; padding: 4px 0; }
     QLabel#metricValue[lowStock="true"] { color: #ef4444; }
@@ -2621,7 +2898,6 @@ if __name__ == "__main__":
     # İkon dosyasını belirle (Önce .ico, yoksa .png dene)
     icon_path = os.path.join(script_dir, "logo.png")
 
-
     # 3. WINDOWS'A ÖZEL AYAR (Sadece Windows ise çalışır)
     # os.name 'nt' ise Windows demektir.
     if os.name == 'nt':
@@ -2646,4 +2922,4 @@ if __name__ == "__main__":
     kontrolcu = AnaKontrolcu()
     kontrolcu.baslat()
 
-    sys.exit(app.exec())# cook your dish here
+    sys.exit(app.exec())
