@@ -70,7 +70,6 @@ class VeritabaniYoneticisi:
         self.cursor = self.baglanti.cursor()
         self.tablolari_olustur()
         self.veritabani_migrasyonu_kontrol_et()
-        
 
     def _sutun_tipi_getir(self, tablo_adi, sutun_adi):
         try:
@@ -278,6 +277,22 @@ class VeritabaniYoneticisi:
         sonuc = self.cursor.fetchone()
         return sonuc[0] if sonuc else 0
 
+    def tum_kullanicilari_getir(self):
+        """Yedekleme için tüm kullanıcı bilgilerini getirir."""
+        self.cursor.execute("SELECT id, kullanici_adi, sifre_hash FROM kullanicilar")
+        return self.cursor.fetchall()
+
+    def kullanici_yukle_raw(self, u_id, k_adi, s_hash):
+        """Yedekten dönerken kullanıcıyı olduğu gibi (şifreyi tekrar hashlemeden) kaydeder."""
+        try:
+            self.cursor.execute("""
+                INSERT INTO kullanicilar (id, kullanici_adi, sifre_hash) 
+                VALUES (?, ?, ?)
+            """, (u_id, k_adi, s_hash))
+            self.baglanti.commit()
+        except Exception as e:
+            print(f"Kullanıcı yükleme hatası ({k_adi}): {e}")
+
     def urun_hucre_guncelle(self, urun_id, sutun_adi, yeni_deger, kullanici_adi):
         izin_verilen_sutunlar = ['kategori', 'fiyat']
         if sutun_adi not in izin_verilen_sutunlar: return False, "Geçersiz güncelleme alanı."
@@ -420,77 +435,7 @@ class VeritabaniYoneticisi:
             self.baglanti.rollback()
             return False, "Yeni kullanıcı adı başkası tarafından kullanılıyor."
 
-    def ornek_veri_yukle(self):
-        try:
-            # Tabloları temizle
-            self.cursor.execute("DELETE FROM stok_hareketleri")
-            self.cursor.execute("DELETE FROM urunler")
 
-            # Örnek Ürünler
-            urunler = [
-                ("101", "Laptop", "Elektronik", 25000.0, 15, "adet", 5, 15, "2025-12-31"),
-                ("102", "Kablosuz Mouse", "Elektronik", 450.0, 50, "adet", 10, 50, "2026-06-30"),
-                ("103", "Mekanik Klavye", "Elektronik", 1200.0, 30, "adet", 5, 30, "2026-06-30"),
-                ("104", "27 inç Monitör", "Elektronik", 6500.0, 10, "adet", 3, 10, "2026-12-31"),
-                ("105", "USB-C Kablo", "Elektronik", 150.0, 100, "adet", 20, 100, "2027-01-01"),
-                ("201", "Erkek T-Shirt", "Giyim", 250.0, 200, "adet", 20, 200, "2025-09-01"),
-                ("202", "Kot Pantolon", "Giyim", 800.0, 80, "adet", 10, 80, "2025-09-01"),
-                ("203", "Spor Ayakkabı", "Giyim", 1500.0, 40, "çift", 5, 40, "2025-12-01"),
-                ("204", "Kışlık Mont", "Giyim", 2500.0, 25, "adet", 5, 25, "2026-03-01"),
-                ("301", "Filtre Kahve", "Gıda", 180.0, 60, "paket", 10, 60, "2024-08-01"),
-                ("302", "Siyah Çay", "Gıda", 90.0, 100, "paket", 15, 100, "2024-10-01"),
-                ("303", "Çikolata", "Gıda", 25.0, 300, "adet", 50, 300, "2024-06-01"),
-                ("304", "Maden Suyu", "Gıda", 10.0, 500, "şişe", 50, 500, "2024-09-01"),
-                ("401", "A4 Kağıt", "Kırtasiye", 120.0, 100, "paket", 10, 100, "2026-01-01"),
-                ("402", "Tükenmez Kalem", "Kırtasiye", 15.0, 500, "adet", 50, 500, "2027-01-01"),
-                ("403", "Not Defteri", "Kırtasiye", 45.0, 150, "adet", 20, 150, "2026-01-01"),
-                ("501", "Çalışma Masası", "Mobilya", 3500.0, 5, "adet", 2, 5, "2030-01-01"),
-                ("502", "Ofis Sandalyesi", "Mobilya", 2800.0, 8, "adet", 2, 8, "2030-01-01"),
-                ("503", "Kitaplık", "Mobilya", 1500.0, 10, "adet", 3, 10, "2030-01-01")
-            ]
-
-            for u in urunler:
-                self.cursor.execute("""
-                    INSERT INTO urunler (urun_kodu, ad, kategori, fiyat, miktar, birim, min_stok, baslangic_miktari, son_kullanma_tarihi, aktif)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-                """, u)
-
-                # Başlangıç stoğu hareketi
-                urun_id = self.cursor.lastrowid
-                self._stok_hareketi_kaydet(urun_id, "Sistem", "STOK GİRİŞİ", u[4], u[4], "Başlangıç Stoğu")
-
-            # Rastgele Satış Geçmişi Oluştur (Son 30 gün için)
-            import random
-            from datetime import timedelta
-
-            ids = [row[0] for row in self.cursor.execute("SELECT id FROM urunler").fetchall()]
-
-            for _ in range(50):  # 50 rastgele işlem
-                u_id = random.choice(ids)
-                gun_geri = random.randint(0, 30)
-                tarih = datetime.now() - timedelta(days=gun_geri)
-
-                # Ürün bilgisini al
-                self.cursor.execute("SELECT fiyat, miktar FROM urunler WHERE id = ?", (u_id,))
-                fiyat, stok = self.cursor.fetchone()
-
-                miktar = random.randint(1, 5)
-                if stok >= miktar:
-                    tutar = miktar * fiyat
-                    # Stok düş
-                    yeni_stok = stok - miktar
-                    self.cursor.execute("UPDATE urunler SET miktar = ? WHERE id = ?", (yeni_stok, u_id))
-
-                    # Hareketi kaydet (Tarihi manipüle ederek)
-                    self.cursor.execute("""
-                        INSERT INTO stok_hareketleri (urun_id, kullanici_adi, islem_tipi, miktar_degisimi, yeni_miktar, notlar, tarih, satis_fiyati)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (u_id, "Sistem", "STOK ÇIKIŞI", -miktar, yeni_stok, "Otomatik Satış", tarih, fiyat))
-
-            self.baglanti.commit()
-            return True, "Örnek veriler başarıyla yüklendi."
-        except Exception as e:
-            return False, f"Veri yükleme hatası: {e}"
 
 
 # =============================================================================
@@ -583,36 +528,46 @@ class FirebaseYedekleyici(QDialog):
                     "son_kullanma_tarihi": urun[9]
                 }
 
-            # 2. STOK HAREKETLERİNİ (SATIŞLARI) HAZIRLA
+            # 2. STOK HAREKETLERİNİ HAZIRLA
             self.veritabani.cursor.execute("SELECT * FROM stok_hareketleri")
             hareketler = self.veritabani.cursor.fetchall()
             hareketler_export = {}
-
-            # Tablo yapısı: id, urun_id, kullanici, islem, miktar_deg, yeni_mik, tarih, notlar, satis_fiyati
             for h in hareketler:
                 h_id = str(h[0])
-                tarih_str = str(h[6])  # Timestamp'i string yap
+                tarih_str = str(h[6])
                 hareketler_export[h_id] = {
                     "urun_id": h[1], "kullanici_adi": h[2], "islem_tipi": h[3],
                     "miktar_degisimi": h[4], "yeni_miktar": h[5], "tarih": tarih_str,
                     "notlar": h[7], "satis_fiyati": h[8]
                 }
 
+            # --- YENİ EKLENEN KISIM: 3. KULLANICILARI HAZIRLA ---
+            kullanicilar = self.veritabani.tum_kullanicilari_getir()
+            kullanicilar_export = {}
+            for k in kullanicilar:
+                k_id = str(k[0])
+                kullanicilar_export[k_id] = {
+                    "kullanici_adi": k[1],
+                    "sifre_hash": k[2]  # Şifreyi hashli haliyle yedekliyoruz
+                }
+            # ----------------------------------------------------
+
             full_data = {
                 "urunler": urunler_export,
-                "hareketler": hareketler_export
+                "hareketler": hareketler_export,
+                "kullanicilar": kullanicilar_export  # Listeye ekledik
             }
 
             self.status_lbl.setText("Firebase'e yükleniyor...")
             self.progress.setValue(50)
             QApplication.processEvents()
 
-            ref = db.reference('tam_yedek')  # 'stoklar' yerine yeni bir düğüm
+            ref = db.reference('tam_yedek')
             ref.set(full_data)
 
             self.progress.setValue(100)
             self.status_lbl.setText("Yedekleme Başarılı!")
-            QMessageBox.information(self, "Başarılı", "Ürünler ve Satış Geçmişi buluta yüklendi.")
+            QMessageBox.information(self, "Başarılı", "Ürünler, Geçmiş ve Kullanıcılar buluta yüklendi.")
 
         except Exception as e:
             self.status_lbl.setText("Hata oluştu.")
@@ -623,14 +578,12 @@ class FirebaseYedekleyici(QDialog):
 
         msg = QMessageBox(self)
         msg.setWindowTitle("DİKKAT")
-        msg.setText("Buluttan indirmek, MEVCUT VERİLERİ SİLİP üzerine yazacaktır.\nDevam etmek istiyor musunuz?")
+        msg.setText(
+            "Buluttan indirmek, MEVCUT VERİLERİ (Kullanıcılar dahil) SİLİP üzerine yazacaktır.\nDevam etmek istiyor musunuz?")
         msg.setIcon(QMessageBox.Icon.Warning)
-
-        # Butonları Türkçe olarak ekliyoruz
         btn_evet = msg.addButton("Evet", QMessageBox.ButtonRole.YesRole)
         btn_hayir = msg.addButton("Hayır", QMessageBox.ButtonRole.NoRole)
-
-        msg.setDefaultButton(btn_hayir)  # Varsayılan olarak Hayır seçili olsun (Güvenlik)
+        msg.setDefaultButton(btn_hayir)
         msg.exec()
 
         if msg.clickedButton() != btn_evet:
@@ -657,10 +610,12 @@ class FirebaseYedekleyici(QDialog):
             # Önce tabloları temizle
             cursor.execute("DELETE FROM stok_hareketleri")
             cursor.execute("DELETE FROM urunler")
+            # --- YENİ EKLENEN KISIM: Kullanıcıları Temizle ---
+            cursor.execute("DELETE FROM kullanicilar")
+            # -----------------------------------------------
 
             # 1. ÜRÜNLERİ GERİ YÜKLE
             urunler_data = snapshot.get('urunler', {})
-            # Veri list mi dict mi kontrolü (Firebase bazen liste döndürür)
             iterable_urun = enumerate(urunler_data) if isinstance(urunler_data, list) else urunler_data.items()
 
             for key, val in iterable_urun:
@@ -692,11 +647,22 @@ class FirebaseYedekleyici(QDialog):
                     val.get('tarih'), val.get('notlar'), val.get('satis_fiyati')
                 ))
 
+            # --- YENİ EKLENEN KISIM: 3. KULLANICILARI GERİ YÜKLE ---
+            kullanici_data = snapshot.get('kullanicilar', {})
+            iterable_kul = enumerate(kullanici_data) if isinstance(kullanici_data, list) else kullanici_data.items()
+
+            for key, val in iterable_kul:
+                if val is None: continue
+                k_id = int(key) if isinstance(kullanici_data, dict) else val.get('id', key)
+                # Yeni yazdığımız ham veri yükleme metodunu kullanıyoruz
+                self.veritabani.kullanici_yukle_raw(k_id, val.get('kullanici_adi'), val.get('sifre_hash'))
+            # -------------------------------------------------------
+
             self.veritabani.baglanti.commit()
 
             self.progress.setValue(100)
             self.status_lbl.setText("Tamamlandı!")
-            QMessageBox.information(self, "Başarılı", "Tüm veriler başarıyla geri yüklendi.")
+            QMessageBox.information(self, "Başarılı", "Tüm veriler (Kullanıcılar dahil) başarıyla geri yüklendi.")
 
         except Exception as e:
             self.veritabani.baglanti.rollback()
@@ -2294,6 +2260,7 @@ class DashboardPage(QWidget):
 
 class AnaPencere(QMainWindow):
     cikis_istendi = pyqtSignal()
+
     def __init__(self, kullanici_adi, veritabani_yoneticisi):
         super().__init__()
         self.kullanici_adi = kullanici_adi
@@ -2445,9 +2412,6 @@ class AnaPencere(QMainWindow):
         self.disa_aktar_action = QAction("Verileri CSV Olarak Dışa Aktar", self)
         self.disa_aktar_action.triggered.connect(self.ana_stok_sayfasi.verileri_disa_aktar)
 
-        self.ornek_veri_action = QAction("Verileri Sıfırla ve Örnek Veri Yükle", self)
-        self.ornek_veri_action.triggered.connect(self.ornek_veri_yukle_onay)
-
         self.cikis_action = QAction("Çıkış Yap", self)
         self.cikis_action.triggered.connect(self.oturumu_kapat)
 
@@ -2456,7 +2420,6 @@ class AnaPencere(QMainWindow):
         self.ayarlar_menu.addSeparator()
         self.ayarlar_menu.addAction(self.firebase_action)
         self.ayarlar_menu.addAction(self.disa_aktar_action)
-        self.ayarlar_menu.addAction(self.ornek_veri_action)
         self.ayarlar_menu.addSeparator()
         self.ayarlar_menu.addAction(self.cikis_action)
 
@@ -2465,27 +2428,6 @@ class AnaPencere(QMainWindow):
         self.cikis_istendi.emit()  # Kontrolcüye haber ver
         self.close()
 
-    def ornek_veri_yukle_onay(self):
-        cevap = QMessageBox.question(
-            self,
-            "Onay",
-            "Tüm mevcut veriler silinecek ve örnek veriler yüklenecek.\nBu işlem geri alınamaz!\nDevam etmek istiyor musunuz?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-
-        if cevap == QMessageBox.StandardButton.Yes:
-            basari, mesaj = self.veritabani.ornek_veri_yukle()
-            if basari:
-                QMessageBox.information(self, "Başarılı", mesaj)
-                # Arayüzü yenile
-                self.dashboard_sayfasi.refresh_data()
-                self.ana_stok_sayfasi.stogu_guncelle_arayuz()
-                self.dusuk_stok_sayfasi.stogu_guncelle()
-                self.gecmis_sayfasi.raporu_guncelle()
-                self.satis_raporu_sayfasi.raporu_guncelle()
-                self.kar_zarar_sayfasi.raporu_guncelle()
-            else:
-                QMessageBox.critical(self, "Hata", mesaj)
 
     def ayarlar_menu_goster(self):
         self.ayarlar_menu.exec(self.ayarlar_btn.mapToGlobal(QPoint(0, self.ayarlar_btn.height())))
