@@ -68,8 +68,9 @@ class VeritabaniYoneticisi:
         self.baglanti = sqlite3.connect(db_adi, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
         self.baglanti.execute("PRAGMA foreign_keys = ON")
         self.cursor = self.baglanti.cursor()
-        self.veritabani_migrasyonu_kontrol_et()
         self.tablolari_olustur()
+        self.veritabani_migrasyonu_kontrol_et()
+        
 
     def _sutun_tipi_getir(self, tablo_adi, sutun_adi):
         try:
@@ -522,7 +523,7 @@ class FirebaseYedekleyici(QDialog):
         baslik.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(baslik)
 
-        info = QLabel("Ürünlerinizi VE satış geçmişinizi bulutla eşitleyin.")
+        info = QLabel("Ürünlerinizi ve satış geçmişinizi bulutla eşitleyin.")
         info.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(info)
 
