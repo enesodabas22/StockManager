@@ -7,6 +7,9 @@ import json
 import math
 from datetime import datetime, date
 
+import certifi
+os.environ['SSL_CERT_FILE'] = certifi.where()
+
 # --- ÜÇÜNCÜ PARTİ KÜTÜPHANELER ---
 try:
     from plyer import notification
@@ -32,14 +35,23 @@ from PyQt6.QtWidgets import (
     QFormLayout, QDialogButtonBox, QAbstractItemView, QFileDialog,
     QMainWindow, QMenuBar, QCheckBox, QHeaderView, QFrame, QStackedWidget,
     QListWidget, QListWidgetItem, QStatusBar, QInputDialog, QComboBox,
-    QProgressBar, QDateEdit, QGraphicsDropShadowEffect
+    QProgressBar, QDateEdit, QGraphicsDropShadowEffect, QScrollArea, QTabWidget, QTabBar
 )
 from PyQt6.QtGui import QAction, QFont, QColor, QCursor, QPixmap, QDoubleValidator, QPainter, QPen, QBrush, \
-    QLinearGradient, QRegularExpressionValidator
+    QLinearGradient, QRegularExpressionValidator, QPainterPath
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QDate, QRectF, QSize, QLocale, QRegularExpression
 
 # --- YAPILANDIRMA ---
-FIREBASE_KEY_PATH = "firebase_key.json"
+def dosya_yolunu_bul(relative_path):
+    """ PyInstaller ile paketlenmiş exe ve normal geliştirme ortamı için doğru yolu döner """
+    if hasattr(sys, '_MEIPASS'):
+        # PyInstaller geçici klasörü (Paketlenmiş uygulama buraya bakar)
+        return os.path.join(sys._MEIPASS, relative_path)
+    # Normal çalışma ortamı (PyCharm vb.)
+    return os.path.join(os.path.abspath("."), relative_path)
+
+# Artık dosya yolunu bu fonksiyonla alıyoruz
+FIREBASE_KEY_PATH = dosya_yolunu_bul("firebase_key.json")
 FIREBASE_DB_URL = "https://stockfloww-3cf71-default-rtdb.europe-west1.firebasedatabase.app/"
 DB_NAME = "stok_veritabani.db"
 
@@ -391,6 +403,39 @@ class VeritabaniYoneticisi:
         self.cursor.execute(sorgu)
         return self.cursor.fetchall()
 
+    def veritabanini_sifirla(self, kapsam='tumu', kullanici_adi=None):
+        """
+        kapsam: 'gecmis' (sadece hareketler) veya 'tumu' (ürünler + hareketler).
+        Kullanıcılar tablosu güvenlik gereği silinmez.
+        """
+        try:
+            # 1. Ana verileri sil
+            if kapsam == 'gecmis':
+                self.cursor.execute("DELETE FROM stok_hareketleri")
+                not_mesaji = "Sadece işlem geçmişi temizlendi."
+
+            elif kapsam == 'tumu':
+                self.cursor.execute("DELETE FROM stok_hareketleri")
+                self.cursor.execute("DELETE FROM urunler")
+                not_mesaji = "Tüm ürünler ve geçmiş veriler silindi (Fabrika ayarları)."
+
+            # 2. Sayaçları (ID'leri) sıfırlamayı dene
+            # Bu kısım 'no such table: sqlite_sequence' hatasını engeller.
+            try:
+                self.cursor.execute("DELETE FROM sqlite_sequence WHERE name='stok_hareketleri'")
+                if kapsam == 'tumu':
+                    self.cursor.execute("DELETE FROM sqlite_sequence WHERE name='urunler'")
+            except sqlite3.OperationalError:
+                # sqlite_sequence tablosu yoksa (daha önce hiç veri girilmemişse) sorun yok, devam et.
+                pass
+
+            self.baglanti.commit()
+            return True, not_mesaji
+
+        except Exception as e:
+            self.baglanti.rollback()
+            return False, f"Sıfırlama hatası: {e}"
+
     def genel_bakis_getir(self):
         try:
             urun_cesidi = self.cursor.execute("SELECT COUNT(id) FROM urunler").fetchone()[0]
@@ -434,8 +479,6 @@ class VeritabaniYoneticisi:
         except sqlite3.IntegrityError:
             self.baglanti.rollback()
             return False, "Yeni kullanıcı adı başkası tarafından kullanılıyor."
-
-
 
 
 # =============================================================================
@@ -1918,7 +1961,8 @@ class SimpleChartWidget(QWidget):
             painter.drawLine(points[i], points[i + 1])
 
         # Altını doldur (Gradient)
-        path_brush = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        # Fix: QLinearGradient constructor needs explicit floats or QPointF, not QPoint
+        path_brush = QLinearGradient(rect.left(), rect.top(), rect.left(), rect.bottom())
         path_brush.setColorAt(0, QColor(59, 130, 246, 100))
         path_brush.setColorAt(1, QColor(59, 130, 246, 0))
 
@@ -2079,7 +2123,23 @@ class ChartDetailDialog(QDialog):
         layout.addWidget(btn_close, alignment=Qt.AlignmentFlag.AlignRight)
 
 
+class ClickableCard(QFrame):
+    clicked = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
 class DashboardPage(QWidget):
+    navigation_requested = pyqtSignal(int)  # Sinyal: Ana pencereye gitmesi gereken sayfa indexini bildir
+
     def __init__(self, veritabani_yoneticisi, parent=None):
         super().__init__(parent)
         self.veritabani = veritabani_yoneticisi
@@ -2087,17 +2147,40 @@ class DashboardPage(QWidget):
         self.refresh_data()
 
     def setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(25, 25, 25, 25)
-        layout.setSpacing(20)
+        # Ana layout'u oluştur (ScrollArea içerecek)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # ScrollArea oluştur
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        # Scroll'un içindeki Widget (Tüm içerik burada olacak)
+        content_widget = QWidget()
+        content_widget.setObjectName("dashboardContent")  # Styling için
+
+        # İçerik layout'u (Eski layout buraya taşındı)
+        layout = QVBoxLayout(content_widget)
+        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setSpacing(25)
 
         # --- Üst Kartlar ---
         cards_layout = QHBoxLayout()
-        cards_layout.setSpacing(20)
+        cards_layout.setSpacing(25)
 
+        # Normal Kart
         self.card_total_stock = self.create_info_card("TOPLAM STOK DEĞERİ", "0.00₺", "#3b82f6")
-        self.card_low_stock = self.create_info_card("KRİTİK STOK", "0", "#ef4444")
-        self.card_monthly_sales = self.create_info_card("BU AY SATIŞ", "0.00₺", "#10b981")
+
+        # Tıklanabilir Kartlar
+        # Index 2: Düşük Stok Uyarıları
+        self.card_low_stock = self.create_info_card("KRİTİK STOK", "0", "#ef4444", target_tab_index=2)
+
+        # Index 5: Satışlar
+        self.card_monthly_sales = self.create_info_card("BU AY SATIŞ", "0.00₺", "#10b981", target_tab_index=5)
 
         cards_layout.addWidget(self.card_total_stock)
         cards_layout.addWidget(self.card_low_stock)
@@ -2106,6 +2189,7 @@ class DashboardPage(QWidget):
 
         # --- Grafikler (Üst Satır) ---
         charts_layout = QHBoxLayout()
+        charts_layout.setSpacing(25)
 
         # Sol: Kategori Dağılımı (Bar)
         self.category_chart = SimpleChartWidget("bar", title="Stok Dağılımı (Adet)")
@@ -2137,44 +2221,63 @@ class DashboardPage(QWidget):
         # --- Alt Bilgi ---
         refresh_btn = QPushButton("Verileri Yenile")
         refresh_btn.setFixedWidth(150)
+        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         refresh_btn.clicked.connect(self.refresh_data)
         layout.addWidget(refresh_btn, alignment=Qt.AlignmentFlag.AlignRight)
 
-    def create_info_card(self, title, value, color_code):
-        frame = QFrame()
+        # Widget'ı ScrollArea'ya ata
+        scroll_area.setWidget(content_widget)
+
+        # ScrollArea'yı ana layout'a ekle
+        main_layout.addWidget(scroll_area)
+
+    def create_info_card(self, title, value, color_code, target_tab_index=None):
+        if target_tab_index is not None:
+            frame = ClickableCard()
+            frame.clicked.connect(lambda: self.navigation_requested.emit(target_tab_index))
+            frame.setProperty("clickable", True)
+        else:
+            frame = QFrame()
+            frame.setProperty("clickable", False)
+
         frame.setObjectName("metricCard")
-        frame.setStyleSheet(f"QFrame#metricCard {{ border-left: 4px solid {color_code}; }}")
+        # Direct QSS injection for dynamic border color, cleaner than f-string in main block
+        frame.setStyleSheet(f"#metricCard {{ border-left: 4px solid {color_code}; }}")
+
         l = QVBoxLayout(frame)
+        l.setContentsMargins(20, 20, 20, 20)
         title_lbl = QLabel(title)
         title_lbl.setObjectName("metricTitle")
         val_lbl = QLabel(value)
         val_lbl.setObjectName("metricValue")
         l.addWidget(title_lbl)
         l.addWidget(val_lbl)
-        frame.val_lbl = val_lbl  # Referans tut
+        frame.val_lbl = val_lbl
 
-        # Gölge Efekti
-        self.add_shadow(frame)
+        # --- SHADOW EFFECT ---
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(25)
+        shadow.setXOffset(0)
+        shadow.setYOffset(8)
+        shadow.setColor(QColor(0, 0, 0, 60))  # More subtle, professional shadow
+        frame.setGraphicsEffect(shadow)
 
         return frame
-
-    def add_shadow(self, widget):
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(20)
-        shadow.setXOffset(0)
-        shadow.setYOffset(4)
-        shadow.setColor(QColor(0, 0, 0, 80))
-        widget.setGraphicsEffect(shadow)
 
     def wrap_chart(self, chart_widget):
         frame = QFrame()
         frame.setObjectName("chartCard")
-        # Inline style removed, now using global STYLESHEET
         l = QVBoxLayout(frame)
+        l.setContentsMargins(5, 5, 5, 5)  # Slight padding for the chart content
         l.addWidget(chart_widget)
 
-        # Gölge Efekti
-        self.add_shadow(frame)
+        # --- SHADOW EFFECT ---
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(25)
+        shadow.setXOffset(0)
+        shadow.setYOffset(8)
+        shadow.setColor(QColor(0, 0, 0, 60))
+        frame.setGraphicsEffect(shadow)
 
         return frame
 
@@ -2252,6 +2355,201 @@ class DashboardPage(QWidget):
             # Hata olsa bile uygulamanın çökmemesi için sessizce devam et veya logla
             # Kullanıcıya göstermek istersen:
             # QMessageBox.warning(self, "Dashboard Hatası", str(e))
+
+
+# =============================================================================
+# * YENİ * KULLANIM KILAVUZU DIALOG
+# =============================================================================
+
+# =============================================================================
+# * YENİ * İNTERAKTİF TUR (ONBOARDING)
+# =============================================================================
+
+class TourOverlay(QWidget):
+    """
+    Ekranı karartıp belirli bir widget'ı vurgulayan (spotlight) ve
+    yanında açıklama kutusu gösteren interaktif tur katmanı.
+    """
+
+    def __init__(self, parent_window, steps):
+        super().__init__(parent_window)
+        self.parent_window = parent_window
+        self.steps = steps
+        self.current_step_index = 0
+
+        # Tam ekran kapla
+        self.setGeometry(parent_window.rect())
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)  # Fareyi yakala
+        self.setMouseTracking(True)
+
+        # Bilgi Kutusu Widget'ı
+        self.info_box = QFrame(self)
+        self.info_box.setStyleSheet("""
+            QFrame { 
+                background-color: #f8fafc; 
+                border-radius: 8px; 
+                border: 1px solid #cbd5e1;
+            }
+            QLabel#tourTitle { color: #0f172a; font-weight: bold; font-size: 16px; }
+            QLabel#tourDesc { color: #334155; font-size: 13px; }
+            QPushButton { 
+                background-color: #3b82f6; color: white; border: none; 
+                padding: 6px 12px; border-radius: 4px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #2563eb; }
+            QPushButton#closeBtn { background-color: transparent; color: #64748b; font-weight: normal; }
+            QPushButton#closeBtn:hover { color: #ef4444; }
+        """)
+
+        # Info Box Layout
+        box_layout = QVBoxLayout(self.info_box)
+
+        self.lbl_title = QLabel()
+        self.lbl_title.setObjectName("tourTitle")
+        self.lbl_desc = QLabel()
+        self.lbl_desc.setObjectName("tourDesc")
+        self.lbl_desc.setWordWrap(True)
+
+        # Butonlar
+        btn_layout = QHBoxLayout()
+        self.btn_close = QPushButton("Turu Bitir")
+        self.btn_close.setObjectName("closeBtn")
+        self.btn_close.clicked.connect(self.close_tour)
+
+        self.btn_prev = QPushButton("Geri")
+        self.btn_prev.clicked.connect(self.prev_step)
+        self.btn_next = QPushButton("İleri")
+        self.btn_next.clicked.connect(self.next_step)
+
+        btn_layout.addWidget(self.btn_close)
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.btn_prev)
+        btn_layout.addWidget(self.btn_next)
+
+        box_layout.addWidget(self.lbl_title)
+        box_layout.addWidget(self.lbl_desc)
+        box_layout.addLayout(btn_layout)
+
+        self.info_box.setFixedWidth(300)
+
+        # İlk adımı yükle
+        self.show_step()
+        self.show()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # 1. Yarı saydam siyah arka plan
+        painter.setBrush(QColor(0, 0, 0, 150))
+        painter.setPen(Qt.PenStyle.NoPen)
+        # Tüm ekranı boya
+        full_region = self.rect()
+
+        # Hedef widget'ı bul
+        step_data = self.steps[self.current_step_index]
+        target_widget = step_data.get('widget')
+
+        if target_widget and target_widget.isVisible():
+            # Widget'ın global pozisyonunu bul ve overlay'e göre çevir
+            global_pos = target_widget.mapToGlobal(QPoint(0, 0))
+            local_pos = self.mapFromGlobal(global_pos)
+
+            target_rect = QRectF(local_pos.x(), local_pos.y(), target_widget.width(), target_widget.height())
+
+            # Highlight (Spotlight) oluşturmak için Path kullanıyoruz
+            path = QPainterPath()
+            path.addRect(QRectF(full_region))
+            # Oyuk aç (Dikdörtgen yerine hafif yuvarlak köşeli oyuk daha şık)
+            path.addRoundedRect(target_rect.adjusted(-5, -5, 5, 5), 8, 8)
+
+            # FillRule.OddEvenFill, iç içe şekillerde ortayı boş bırakır
+            path.setFillRule(Qt.FillRule.OddEvenFill)
+
+            painter.drawPath(path)
+
+            # Vurgu çerçevesi çiz
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor("#3b82f6"), 2))
+            painter.drawRoundedRect(target_rect.adjusted(-5, -5, 5, 5), 8, 8)
+
+            # Info Box konumunu güncelle
+            self.position_info_box(target_rect)
+
+        else:
+            # Hedef yoksa sadece ortada göster
+            painter.drawRect(full_region)
+            self.info_box.move(
+                (self.width() - self.info_box.width()) // 2,
+                (self.height() - self.info_box.height()) // 2
+            )
+
+    def position_info_box(self, target_rect):
+        # Kutuyu hedefin yanına, altına veya üstüne koymaya çalış
+        box_w = self.info_box.width()
+        box_h = self.info_box.height()
+
+        # Varsayılan: Hedefin sağında
+        x = target_rect.right() + 20
+        y = target_rect.top()
+
+        # Eğer sağa sığmazsa, sola koy
+        if x + box_w > self.width():
+            x = target_rect.left() - box_w - 20
+
+        # Eğer sola da sığmazsa (mobil vs), alta koy
+        if x < 0:
+            x = target_rect.left()
+            y = target_rect.bottom() + 20
+
+        # Dikey taşmayı kontrol et
+        if y + box_h > self.height():
+            y = self.height() - box_h - 20
+
+        self.info_box.move(int(x), int(y))
+
+    def show_step(self):
+        step = self.steps[self.current_step_index]
+        self.lbl_title.setText(step['title'])
+        self.lbl_desc.setText(step['desc'])
+
+        # Sayfa Değişimi Gerekirse
+        if 'page_index' in step:
+            # Ana pencerenin metoduyla sayfa değiştir
+            # parent_window.nav_list'e erişip değiştirebiliriz
+            self.parent_window.nav_list.setCurrentRow(step['page_index'])
+            # Render döngüsünün widget'ı çizmesini bekle
+            QApplication.processEvents()
+
+        # Buton durumları
+        self.btn_prev.setEnabled(self.current_step_index > 0)
+        if self.current_step_index == len(self.steps) - 1:
+            self.btn_next.setText("Bitir")
+        else:
+            self.btn_next.setText("İleri")
+
+        self.update()  # Repaint triggers
+
+    def next_step(self):
+        if self.current_step_index < len(self.steps) - 1:
+            self.current_step_index += 1
+            self.show_step()
+        else:
+            self.close_tour()
+
+    def prev_step(self):
+        if self.current_step_index > 0:
+            self.current_step_index -= 1
+            self.show_step()
+
+    def close_tour(self):
+        self.close()
+        self.deleteLater()
+
+    def resizeEvent(self, event):
+        # Pencere boyutu değişirse overlay'i de güncelle
+        self.setGeometry(self.parent_window.rect())
+        super().resizeEvent(event)
 
 
 # =============================================================================
@@ -2376,6 +2674,9 @@ class AnaPencere(QMainWindow):
 
         # Sayfalar
         self.dashboard_sayfasi = DashboardPage(self.veritabani)
+        # --- Dashboard'dan gelen navigasyon isteğini karşıla ---
+        self.dashboard_sayfasi.navigation_requested.connect(self.nav_list.setCurrentRow)
+
         self.ana_stok_sayfasi = AnaStokSayfasi(self.veritabani, self.status_bar, self.kullanici_adi)
         self.dusuk_stok_sayfasi = DusukStokSayfasi(self.veritabani)
         self.gecmis_sayfasi = StokHareketSayfasi(self.veritabani, self.kullanici_adi)
@@ -2396,38 +2697,135 @@ class AnaPencere(QMainWindow):
         self.status_bar.showMessage(f"Hoş geldiniz, {self.kullanici_adi}!", 5000)
 
     def init_menu_actions(self):
+        # Menü nesnesini oluştur
         self.ayarlar_menu = QMenu(self)
 
-    def init_menu_actions(self):
-        self.ayarlar_menu = QMenu(self)
+        # 0. Yardım ve Hakkında
+        self.kilavuz_action = QAction("Kullanım Kılavuzu", self)
+        self.kilavuz_action.triggered.connect(self.kullanim_kilavuzu_ac)
+
+        self.hakkinda_action = QAction("Uygulama Hakkında", self)
+        self.hakkinda_action.triggered.connect(self.hakkinda_dialogu_ac)
+
+        # 1. Kullanıcı İşlemleri
         self.kullanici_degistir_action = QAction("Mevcut Kullanıcı Bilgilerini Değiştir", self)
         self.kullanici_degistir_action.triggered.connect(self.kullanici_degistir_dialogu_ac)
+
         self.yeni_kullanici_action = QAction("Yeni Kullanıcı Ekle", self)
         self.yeni_kullanici_action.triggered.connect(self.yeni_kullanici_dialogu_ac)
 
-        # --- FİREBASE AKSİYONU ---
+        # 2. Firebase ve Dışa Aktarma
         self.firebase_action = QAction("Firebase Senkronizasyon", self)
         self.firebase_action.triggered.connect(self.firebase_penceresi_ac)
 
         self.disa_aktar_action = QAction("Verileri CSV Olarak Dışa Aktar", self)
         self.disa_aktar_action.triggered.connect(self.ana_stok_sayfasi.verileri_disa_aktar)
 
+        # 3. VERİ SIFIRLAMA
+        self.sifirlama_action = QAction("Veri Tabanını Sıfırla / Temizle", self)
+        self.sifirlama_action.triggered.connect(self.veri_sifirlama_islemi)
+
+        # 4. Çıkış
         self.cikis_action = QAction("Çıkış Yap", self)
         self.cikis_action.triggered.connect(self.oturumu_kapat)
+
+        # --- AKSİYONLARI MENÜYE EKLEME ---
+        self.ayarlar_menu.addAction(self.kilavuz_action)  # En üste
+        self.ayarlar_menu.addAction(self.hakkinda_action)
+        self.ayarlar_menu.addSeparator()
 
         self.ayarlar_menu.addAction(self.kullanici_degistir_action)
         self.ayarlar_menu.addAction(self.yeni_kullanici_action)
         self.ayarlar_menu.addSeparator()
+
         self.ayarlar_menu.addAction(self.firebase_action)
         self.ayarlar_menu.addAction(self.disa_aktar_action)
         self.ayarlar_menu.addSeparator()
+
+        self.ayarlar_menu.addAction(self.sifirlama_action)
+
+        self.ayarlar_menu.addSeparator()
         self.ayarlar_menu.addAction(self.cikis_action)
+
+    def kullanim_kilavuzu_ac(self):
+        # Tur Adımları Tanımlama
+        steps = [
+            {
+                'title': 'StockFlow\'a Hoş Geldiniz!',
+                'desc': 'Uygulamamızın temel özelliklerini hızlıca keşfetmeye hazır mısınız? Bu kısa tur size rehberlik edecek.',
+                'widget': None,  # Ortada göster
+                'page_index': 0  # Dashboard'a git
+            },
+            {
+                'title': 'Navigasyon Menüsü',
+                'desc': 'Sol taraftaki bu menüyü kullanarak stok listesi, raporlar ve satış ekranları arasında geçiş yapabilirsiniz.',
+                'widget': self.sidebar,
+                'page_index': 0
+            },
+            {
+                'title': 'Anlık Durum Kartları',
+                'desc': 'İşletmenizin o anki stok değeri ve kritik uyarıları burada özetlenir.\n\nİpucu: Kırmızı ve yeşil kartlara tıklayarak detaylara gidebilirsiniz.',
+                'widget': self.dashboard_sayfasi.findChild(QWidget, "metricCard"),
+                # İlk kartı bulmaya çalışır (Toplam Stok)
+                'page_index': 0
+            },
+            {
+                'title': 'Grafiksel Analiz',
+                'desc': 'Satış trendlerini ve stok dağılımını bu grafiklerden takip edebilirsiniz. Detaylı analiz için grafiklerin üzerine tıklayın.',
+                'widget': self.dashboard_sayfasi.sales_chart_frame,
+                'page_index': 0
+            },
+            {
+                'title': 'Stok Yönetimi',
+                'desc': 'Tüm ürünlerinizi buradan yönetirsiniz. Yeni ürün eklemek için (+), düzenlemek veya satış yapmak için (•••) butonunu kullanın.',
+                'widget': self.ana_stok_sayfasi.stok_tablosu,  # Tabloyu vurgula
+                'page_index': 1  # Stok Sayfasına Git
+            },
+            {
+                'title': 'Düşük Stok Uyarıları',
+                'desc': 'Stok miktarı, belirlediğiniz kritik seviyenin altına düşen ürünler burada listelenir. Eksikleri buradan takip edip sipariş verebilirsiniz.',
+                'widget': self.dusuk_stok_sayfasi.stok_tablosu,
+                'page_index': 2  # Düşük Stok Sayfasına Git
+            },
+            {
+                'title': 'Stok Geçmişi & Loglar',
+                'desc': 'Hangi ürün ne zaman eklendi, ne zaman satıldı? Tüm giriş-çıkış hareketleri ve kullanıcı işlemleri burada kayıtlıdır.',
+                'widget': self.gecmis_sayfasi.rapor_tablosu,
+                'page_index': 3  # Geçmiş Sayfasına Git
+            },
+            {
+                'title': 'Satış Raporları',
+                'desc': 'Belirli tarih aralıklarındaki satış performansınızı ve ciro detaylarınızı bu ekrandan analiz edebilirsiniz.',
+                'widget': self.satis_raporu_sayfasi.tablo,
+                'page_index': 4  # Satış Raporu Sayfasına Git
+            },
+            {
+                'title': 'Ayarlar Menüsü',
+                'desc': 'Kullanıcı işlemleri, yedekleme ve veri sıfırlama gibi yönetimsel araçlara buradan ulaşabilirsiniz.',
+                'widget': self.ayarlar_btn,
+                'page_index': 0  # Dashboard'a geri dön
+            }
+        ]
+
+        self.tour = TourOverlay(self, steps)
+
+    def hakkinda_dialogu_ac(self):
+        QMessageBox.information(self, "StockFlow Hakkında",
+                                "<b>StockFlow Stok Takip Sistemi</b><br>"
+                                "Sürüm: 2.1.0<br>"
+                                "Geliştirici: StockFlow Team<br><br>"
+                                "Modern, hızlı ve güvenilir stok yönetimi.<br>"
+                                "Tüm hakları saklıdır © 2025")
 
     def oturumu_kapat(self):
         """Sinyal gönderir ve pencereyi kapatır."""
-        self.cikis_istendi.emit()  # Kontrolcüye haber ver
-        self.close()
+        cevap = QMessageBox.question(self, "Çıkış Yap", "Oturumu kapatmak istediğinizden emin misiniz?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No)
 
+        if cevap == QMessageBox.StandardButton.Yes:
+            self.cikis_istendi.emit()  # Kontrolcüye haber ver
+            self.close()
 
     def ayarlar_menu_goster(self):
         self.ayarlar_menu.exec(self.ayarlar_btn.mapToGlobal(QPoint(0, self.ayarlar_btn.height())))
@@ -2478,6 +2876,78 @@ class AnaPencere(QMainWindow):
         # Ancak AnaStokSayfasi'nda bu metod zaten var ama butona bağlı.
         # Biz direkt dialogu açalım.
         self.ana_stok_sayfasi.yeni_urun_ekle()
+
+    def veri_sifirlama_islemi(self):
+        # 1. KAPSAM SEÇİMİ PENCERESİ
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Veri Sıfırlama Seçenekleri")
+        msg_box.setText("Hangi verileri silmek istiyorsunuz?")
+        msg_box.setInformativeText("DİKKAT: Bu işlem geri alınamaz!")
+        msg_box.setIcon(QMessageBox.Icon.Warning)
+
+        # Butonları Türkçe tanımlıyoruz
+        btn_gecmis = msg_box.addButton("Sadece Geçmişi Sil", QMessageBox.ButtonRole.ActionRole)
+        btn_hepsi = msg_box.addButton("Her Şeyi Sil (Fabrika Ayarları)", QMessageBox.ButtonRole.DestructiveRole)
+        btn_iptal = msg_box.addButton("İptal", QMessageBox.ButtonRole.RejectRole)
+
+        msg_box.exec()
+
+        secilen_buton = msg_box.clickedButton()
+        if secilen_buton == btn_iptal:
+            return
+
+        kapsam = 'tumu' if secilen_buton == btn_hepsi else 'gecmis'
+        onay_kelimesi = "SIFIRLA"
+
+        # 2. GÜVENLİK ONAYI PENCERESİ (Input Dialog)
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle("Güvenlik Onayı")
+        dialog.setLabelText(f"Bu işlem kalıcıdır.\nOnaylamak için lütfen '{onay_kelimesi}' yazın:")
+        dialog.setTextValue("")
+
+        # --- BURASI DÜZELTİLDİ: OK/Cancel yerine Tamam/İptal ---
+        dialog.setOkButtonText("Tamam")
+        dialog.setCancelButtonText("İptal")
+        # -------------------------------------------------------
+
+        ok = dialog.exec()
+        text = dialog.textValue()
+
+        if ok and text == onay_kelimesi:
+            basari, mesaj = self.veritabani.veritabanini_sifirla(kapsam, self.kullanici_adi)
+
+            # Sonuç mesaj kutusu (Bunu da Türkçeleştiriyoruz)
+            sonuc_box = QMessageBox(self)
+            if basari:
+                sonuc_box.setWindowTitle("Başarılı")
+                sonuc_box.setIcon(QMessageBox.Icon.Information)
+                sonuc_box.setText(mesaj)
+                sonuc_box.addButton("Tamam", QMessageBox.ButtonRole.AcceptRole)  # Türkçe buton
+                sonuc_box.exec()
+
+                # Arayüzü yenile
+                self.dashboard_sayfasi.refresh_data()
+                self.ana_stok_sayfasi.stogu_guncelle_arayuz()
+                self.dusuk_stok_sayfasi.stogu_guncelle()
+                self.gecmis_sayfasi.raporu_guncelle()
+                self.satis_raporu_sayfasi.raporu_guncelle()
+                self.kar_zarar_sayfasi.raporu_guncelle()
+                self.nav_list.setCurrentRow(0)
+            else:
+                sonuc_box.setWindowTitle("Hata")
+                sonuc_box.setIcon(QMessageBox.Icon.Critical)
+                sonuc_box.setText(mesaj)
+                sonuc_box.addButton("Tamam", QMessageBox.ButtonRole.AcceptRole)  # Türkçe buton
+                sonuc_box.exec()
+
+        elif ok:
+            # Yanlış kelime girilirse
+            uyari_box = QMessageBox(self)
+            uyari_box.setWindowTitle("İptal Edildi")
+            uyari_box.setIcon(QMessageBox.Icon.Warning)
+            uyari_box.setText("Doğrulama kelimesi yanlış girildiği için işlem iptal edildi.")
+            uyari_box.addButton("Tamam", QMessageBox.ButtonRole.AcceptRole)
+            uyari_box.exec()
 
 
 # =============================================================================
@@ -2774,22 +3244,22 @@ STYLESHEET = """
     /* Global Reset & Fonts */
     * { font-family: 'Segoe UI', 'Roboto', sans-serif; color: #e2e8f0; selection-background-color: #3b82f6; selection-color: #ffffff; }
 
-    /* Main Backgrounds */
-    QMainWindow, QWidget#central_widget { background-color: #0f172a; }
-    QDialog, QWidget#authWindow { background-color: #1e293b; border: 1px solid #334155; border-radius: 8px; }
-    QMessageBox { background-color: #1e293b; color: #e2e8f0; }
+    /* Main Backgrounds - Content is lighter (#20293a) than Sidebar (#0f172a) */
+    QMainWindow, QWidget#central_widget { background-color: #20293a; }
+    QDialog, QWidget#authWindow { background-color: #20293a; border: 1px solid #334155; border-radius: 8px; }
+    QMessageBox { background-color: #20293a; color: #e2e8f0; }
 
-    /* Sidebar - LIGHTER SHADE REQUESTED */
-    QFrame#sidebarFrame { background-color: #334155; border-right: 1px solid #475569; }
+    /* Sidebar - DARK & PROFESSIONAL */
+    QFrame#sidebarFrame { background-color: #0f172a; border-right: 1px solid #1e293b; }
     QFrame#sidebarFrame QLabel { color: #cbd5e1; font-size: 11px; font-weight: 700; text-transform: uppercase; padding-left: 12px; padding-top: 20px; letter-spacing: 0.5px; }
     QLabel#logoIcon { qproperty-alignment: 'AlignCenter'; min-height: 50px; padding: 10px; margin: 0; }
     QLabel#logoText { font-size: 22px; font-weight: 800; color: #f8fafc; padding: 0; letter-spacing: 0.5px; }
 
     /* Navigation List */
     QListWidget#sidebarNav { border: none; background: transparent; outline: none; margin-top: 10px; }
-    QListWidget#sidebarNav::item { padding: 12px 16px; border-radius: 8px; color: #cbd5e1; font-weight: 500; margin: 4px 12px; transition: all 0.2s; }
-    QListWidget#sidebarNav::item:hover { background-color: #475569; color: #f1f5f9; }
-    QListWidget#sidebarNav::item:selected { background-color: #2563eb; color: #ffffff; font-weight: 600; border-left: 4px solid #60a5fa; }
+    QListWidget#sidebarNav::item { padding: 12px 16px; border-radius: 8px; color: #94a3b8; font-weight: 500; margin: 4px 12px; transition: all 0.2s; }
+    QListWidget#sidebarNav::item:hover { background-color: #1e293b; color: #f1f5f9; }
+    QListWidget#sidebarNav::item:selected { background-color: #3b82f6; color: #ffffff; font-weight: 600; border-left: 4px solid #60a5fa; }
 
     /* Buttons */
     QPushButton { background-color: #3b82f6; color: white; border: none; border-radius: 6px; padding: 8px 16px; font-weight: 600; font-size: 13px; }
@@ -2801,8 +3271,8 @@ STYLESHEET = """
     QPushButton#headerButton { background: transparent; border: 1px solid #334155; color: #cbd5e1; font-weight: 500; padding: 6px 12px; }
     QPushButton#headerButton:hover { background: #334155; color: white; border-color: #475569; }
 
-    QPushButton#filterBtn { background: #1e293b; border: 1px solid #334155; color: #cbd5e1; }
-    QPushButton#filterBtn:hover { background: #334155; border-color: #475569; }
+    QPushButton#filterBtn { background: #334155; border: 1px solid #475569; color: #e2e8f0; }
+    QPushButton#filterBtn:hover { background: #475569; border-color: #64748b; }
     QPushButton#filterBtn[filtered="true"] { background: #3b82f6; color: white; border: none; }
 
     QPushButton#yeniUrunBtn { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #10b981, stop:1 #059669); }
@@ -2815,58 +3285,70 @@ STYLESHEET = """
     QPushButton#linkButton:hover { color: #93c5fd; text-decoration: underline; }
 
     /* Header & Content */
-    QFrame#contentContainer { background: #0f172a; }
-    QFrame#headerBar { background-color: #0f172a; border-bottom: 1px solid #1e293b; }
+    QFrame#contentContainer { background: #20293a; }
+    QFrame#headerBar { background-color: #20293a; border-bottom: 1px solid #334155; }
     QLabel#pageTitle { font-size: 24px; font-weight: 700; color: #f1f5f9; padding: 0; }
     QLabel#pageSubtitle { font-size: 14px; color: #94a3b8; }
 
-    /* Cards - Modern Gradient */
+    /* Cards - Lighter than background to pop */
     QFrame#metricCard {
-        background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1e293b, stop:1 #0f172a);
-        border: 1px solid #334155;
+        background-color: #334155;
+        border: 1px solid #475569;
         border-radius: 12px;
         padding: 20px;
     }
-    /* Hover removed for metricCard as requested */
 
-    /* Chart Cards - Clickable */
-    QFrame#chartCard { background-color: #1e293b; border-radius: 12px; border: 1px solid #334155; }
-    QFrame#chartCard:hover { border-color: #60a5fa; background-color: #252f45; cursor: pointer; }
+    QFrame#metricCard[clickable="true"]:hover {
+        background-color: #3e4c63;
+        border-color: #60a5fa;
+        cursor: pointer;
+    }
 
-    QLabel#metricTitle { font-size: 12px; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
+    /* Chart Cards */
+    QFrame#chartCard { background-color: #334155; border-radius: 12px; border: 1px solid #475569; }
+    QFrame#chartCard:hover { border-color: #60a5fa; background-color: #3e4c63; cursor: pointer; }
+
+    QLabel#metricTitle { font-size: 12px; font-weight: 600; color: #cbd5e1; text-transform: uppercase; letter-spacing: 0.5px; }
     QLabel#metricValue { font-size: 28px; font-weight: 700; color: #f1f5f9; padding: 4px 0; }
     QLabel#metricValue[lowStock="true"] { color: #ef4444; }
-    QLabel#metricUnit { font-size: 12px; color: #64748b; margin-left: 4px; padding-bottom: 4px; }
+    QLabel#metricUnit { font-size: 12px; color: #94a3b8; margin-left: 4px; padding-bottom: 4px; }
 
     /* Search & Inputs */
-    QFrame#searchContainer { background-color: #1e293b; border: 1px solid #334155; border-radius: 8px; }
+    QFrame#searchContainer { background-color: #334155; border: 1px solid #475569; border-radius: 8px; }
     QLineEdit#searchInput { border: none; background: transparent; padding: 10px; font-size: 14px; color: #f1f5f9; }
 
-    QLineEdit, QComboBox, QDateEdit { background-color: #1e293b; border: 1px solid #334155; border-radius: 6px; padding: 8px; color: #f1f5f9; font-size: 13px; }
-    QLineEdit:focus, QComboBox:focus, QDateEdit:focus { border-color: #3b82f6; background-color: #252f45; }
-    QLineEdit::placeholder { color: #64748b; }
+    QLineEdit, QComboBox, QDateEdit { background-color: #334155; border: 1px solid #475569; border-radius: 6px; padding: 8px; color: #f1f5f9; font-size: 13px; }
+    QLineEdit:focus, QComboBox:focus, QDateEdit:focus { border-color: #3b82f6; background-color: #3e4c63; }
+    QLineEdit::placeholder { color: #94a3b8; }
 
     /* Tables */
-    QTableWidget { background-color: #1e293b; border: 1px solid #334155; border-radius: 8px; gridline-color: #334155; outline: none; }
-    QTableWidget::item { padding: 12px 8px; border-bottom: 1px solid #334155; color: #e2e8f0; }
+    QTableWidget { background-color: #334155; border: 1px solid #475569; border-radius: 8px; gridline-color: #475569; outline: none; }
+    QTableWidget::item { padding: 12px 8px; border-bottom: 1px solid #475569; color: #e2e8f0; }
     QTableWidget::item:selected { background-color: #3b82f6; color: #ffffff; }
-    QHeaderView::section { background-color: #0f172a; padding: 12px 10px; border: none; border-bottom: 2px solid #334155; font-weight: 600; color: #94a3b8; text-transform: uppercase; font-size: 12px; }
-    QTableWidget QTableCornerButton::section { background-color: #0f172a; border: none; }
+    QHeaderView::section { background-color: #1e293b; padding: 12px 10px; border: none; border-bottom: 2px solid #475569; font-weight: 600; color: #cbd5e1; text-transform: uppercase; font-size: 12px; }
+    QTableWidget QTableCornerButton::section { background-color: #1e293b; border: none; }
 
     /* Menus */
-    QMenu { background: #1e293b; border: 1px solid #334155; padding: 4px; border-radius: 6px; }
+    QMenu { background: #334155; border: 1px solid #475569; padding: 4px; border-radius: 6px; }
     QMenu::item { padding: 6px 24px 6px 12px; border-radius: 4px; color: #e2e8f0; }
     QMenu::item:selected { background: #3b82f6; color: white; }
-    QMenu::separator { height: 1px; background: #334155; margin: 4px 0; }
+    QMenu::separator { height: 1px; background: #475569; margin: 4px 0; }
+
+    /* ScrollArea & Dashboard Content */
+    QScrollArea { background-color: transparent; border: none; }
+    QWidget#dashboardContent { background-color: #20293a; }
 
     /* Scrollbars */
-    QScrollBar:vertical { border: none; background: #0f172a; width: 10px; margin: 0; }
-    QScrollBar::handle:vertical { background: #334155; min-height: 20px; border-radius: 5px; }
-    QScrollBar::handle:vertical:hover { background: #475569; }
+    QScrollBar:vertical { border: none; background: #20293a; width: 10px; margin: 0; }
+    QScrollBar::handle:vertical { background: #475569; min-height: 20px; border-radius: 5px; }
+    QScrollBar::handle:vertical:hover { background: #64748b; }
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
 
+    QScrollBar:horizontal { border: none; background: #20293a; height: 10px; margin: 0; }
+    QScrollBar::handle:horizontal { background: #475569; min-width: 20px; border-radius: 5px; }
+
     /* Status Bar */
-    QStatusBar { background: #0f172a; border-top: 1px solid #334155; color: #64748b; padding: 4px; }
+    QStatusBar { background: #0f172a; border-top: 1px solid #1e293b; color: #94a3b8; padding: 4px; }
 """
 
 # ... (Mevcut kodlarınızın üst kısmı aynı kalacak)
