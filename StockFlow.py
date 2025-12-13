@@ -838,13 +838,22 @@ class YeniKullaniciDialog(QDialog):
         self.setObjectName("authWindow")
         self.setMinimumWidth(400)
 
-        # Pencereyi ortala (Opsiyonel ama şık durur)
-        frame_geo = self.frameGeometry()
-        screen = self.screen()
-        if screen:
-            center_point = screen.availableGeometry().center()
-            frame_geo.moveCenter(center_point)
-            self.move(frame_geo.topLeft())
+        if parent:
+            # Eğer ana pencere üzerinden açıldıysa, ANA PENCERENİN ortasında açıl
+            parent_geo = parent.geometry()
+            self_geo = self.geometry()
+            x = parent_geo.x() + (parent_geo.width() - self.width()) // 2
+            y = parent_geo.y() + (parent_geo.height() - self.height()) // 2
+            self.move(x, y)
+        else:
+            # Eğer ana pencere yoksa, EKRANIN ortasında açıl
+            screen = QApplication.primaryScreen()
+            if screen:
+                rect = screen.availableGeometry()
+                center = rect.center()
+                frame_geo = self.frameGeometry()
+                frame_geo.moveCenter(center)
+                self.move(frame_geo.topLeft())
 
         self.ana_layout = QVBoxLayout(self)
 
@@ -2563,7 +2572,6 @@ class AnaPencere(QMainWindow):
         super().__init__()
         self.kullanici_adi = kullanici_adi
         self.veritabani = veritabani_yoneticisi
-        self.onceki_sayfa_index = 0
         self.setWindowTitle(f"StockFlow - {kullanici_adi}")
         self.setGeometry(100, 100, 1400, 900)
         self.setMinimumSize(1200, 700)
@@ -2572,6 +2580,9 @@ class AnaPencere(QMainWindow):
         self.main_layout = QHBoxLayout(self.central_widget)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
+        self.sayfa_gecmisi = []  # Ziyaret edilen sayfaların listesi
+        self.aktif_sayfa_index = 0  # Şu anki sayfa
+        self.geri_basildi_flag = False
         self.init_ui()
         self.init_menu_actions()
 
@@ -2818,14 +2829,9 @@ class AnaPencere(QMainWindow):
                                 "Tüm hakları saklıdır © 2025")
 
     def oturumu_kapat(self):
-        """Sinyal gönderir ve pencereyi kapatır."""
-        cevap = QMessageBox.question(self, "Çıkış Yap", "Oturumu kapatmak istediğinizden emin misiniz?",
-                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                     QMessageBox.StandardButton.No)
-
-        if cevap == QMessageBox.StandardButton.Yes:
-            self.cikis_istendi.emit()  # Kontrolcüye haber ver
-            self.close()
+        """Onay sormadan direkt çıkış yapar."""
+        self.cikis_istendi.emit()  # Kontrolcüye haber ver (Giriş ekranını açar)
+        self.close()
 
     def ayarlar_menu_goster(self):
         self.ayarlar_menu.exec(self.ayarlar_btn.mapToGlobal(QPoint(0, self.ayarlar_btn.height())))
@@ -2835,7 +2841,7 @@ class AnaPencere(QMainWindow):
         dialog.exec()
 
     def yeni_kullanici_dialogu_ac(self):
-        dialog = YeniKullaniciDialog(self.veritabani, self)
+        dialog = YeniKullaniciDialog(self.veritabani, None)
         dialog.exec()
 
     def firebase_penceresi_ac(self):
@@ -2845,9 +2851,34 @@ class AnaPencere(QMainWindow):
         self.ana_stok_sayfasi.stogu_guncelle_arayuz()
 
     def geri_git(self):
-        self.nav_list.setCurrentRow(self.onceki_sayfa_index)
+        """Geçmiş listesindeki son sayfaya döner."""
+        if self.sayfa_gecmisi:
+            # Listeden son gezilen sayfayı alıyoruz (pop işlemi silerek alır)
+            onceki_index = self.sayfa_gecmisi.pop()
+
+            # Geri tuşuna basıldığını işaretliyoruz ki bu geçişi tekrar geçmişe eklemesin
+            self.geri_basildi_flag = True
+
+            # Sayfayı değiştir
+            self.nav_list.setCurrentRow(onceki_index)
+
+        # Eğer geçmiş bittiyse butonu pasif yapabiliriz (Opsiyonel)
+        if not self.sayfa_gecmisi:
+            self.geri_btn.setEnabled(False)
 
     def sayfa_degisti(self, index):
+        if not self.geri_basildi_flag:
+            # Eğer geri butonuna basılmadıysa (normal tıklama ise)
+            # Şu anki sayfayı (değişmeden önceki halini) geçmişe ekle
+            if self.aktif_sayfa_index != index:  # Aynı sayfaya tıklanmadıysa
+                self.sayfa_gecmisi.append(self.aktif_sayfa_index)
+                self.geri_btn.setEnabled(True)  # Geçmiş oluştuğu için butonu aktif et
+        else:
+            # Geri butonuna basıldıysa flag'i sıfırla, geçmişe ekleme yapma
+            self.geri_basildi_flag = False
+
+            # Aktif sayfayı güncelle
+        self.aktif_sayfa_index = index
         self.stacked_widget.setCurrentIndex(index)
         basliklar = ["Genel Bakış", "Ana Stok Listesi", "Düşük Stok Uyarıları", "Stok Hareketleri", "En Çok Satanlar",
                      "Satış Raporu"]
@@ -3126,10 +3157,22 @@ class KullaniciDegistirPenceresi(BaseAuthWindow):
         duzen.addRow("Yeni Şifre:", self.y_sifre)
         duzen.addRow("Yeni Şifre Tekrar:", self.y_sifre_t)
         self.ana_layout.addLayout(duzen)
-        btn = QPushButton("Değişiklikleri Onayla")
-        btn.clicked.connect(self.bilgileri_degistir)
-        self.ana_layout.addWidget(btn)
+
+        self.buttonBox = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+
+        # Butonların üzerindeki yazıları değiştiriyoruz
+        self.buttonBox.button(QDialogButtonBox.StandardButton.Ok).setText("Değişiklikleri Onayla")
+        self.buttonBox.button(QDialogButtonBox.StandardButton.Cancel).setText("Geri Dön")
+
+        # Tıklama olaylarını bağlıyoruz
+        self.buttonBox.accepted.connect(self.bilgileri_degistir)  # Onayla'ya basınca kaydet
+        self.buttonBox.rejected.connect(self.reject)  # Geri'ye basınca pencereyi kapat
+
+        # Ekrana ekliyoruz
+        self.ana_layout.addWidget(self.buttonBox)
         self.ana_layout.addStretch()
+
+        # Enter tuşuna basınca onaylama çalışsın
         self.y_sifre_t.returnPressed.connect(self.bilgileri_degistir)
 
     def bilgileri_degistir(self):
