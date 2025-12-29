@@ -49,7 +49,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QAction, QFont, QColor, QCursor, QPixmap, QDoubleValidator, QPainter, QPen, QBrush, \
     QLinearGradient, QRegularExpressionValidator, QPainterPath
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QDate, QRectF, QSize, QLocale, QRegularExpression, \
-    QPropertyAnimation, QEasingCurve, pyqtProperty
+    QPropertyAnimation, QEasingCurve, pyqtProperty, QParallelAnimationGroup
 
 STANDART_BIRIMLER = [
     "Adet", "Kg", "Paket", "Kutu", "Koli",
@@ -62,7 +62,7 @@ def dosya_yolunu_bul(relative_path):
         # PyInstaller geçici klasörü (Paketlenmiş uygulama buraya bakar)
         return os.path.join(sys._MEIPASS, relative_path)
     # Normal çalışma ortamı (PyCharm vb.)
-    return os.path.join(os.path.abspath("."), relative_path)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
 
 # Artık dosya yolunu bu fonksiyonla alıyoruz
 FIREBASE_KEY_PATH = dosya_yolunu_bul("firebase_key.json")
@@ -888,8 +888,7 @@ class YeniKullaniciDialog(QDialog):
         logo_icon = QLabel()
         logo_icon.setObjectName("logoIcon")
         try:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            logo_path = os.path.join(script_dir, "StockFlow_Logo.png")
+            logo_path = dosya_yolunu_bul("StockFlow_Logo.png")
             logo_pixmap = QPixmap(logo_path)
             if not logo_pixmap.isNull():
                 # --- LOGO BOYUTU BURADAN AYARLANIYOR ---
@@ -900,8 +899,9 @@ class YeniKullaniciDialog(QDialog):
             else:
                 raise FileNotFoundError
         except FileNotFoundError:
-            logo_icon.setText("SF")
-            logo_icon.setStyleSheet("font-size: 48px; qproperty-alignment: AlignCenter;")
+             # Logo yoksa boş kalsın veya basit metin
+            logo_icon.setText("STOCKFLOW")
+            logo_icon.setStyleSheet("font-size: 24px; font-weight: bold; color: #3b82f6; qproperty-alignment: AlignCenter;")
 
         logo_text = QLabel("Yeni Hesap Oluştur")
         logo_text.setObjectName("logoText")
@@ -2422,6 +2422,19 @@ class DashboardPage(QWidget):
         layout.setContentsMargins(30, 30, 30, 30)
         layout.setSpacing(25)
 
+
+        # --- Üst Bar (Yenile Butonu) ---
+        top_bar_layout = QHBoxLayout()
+        top_bar_layout.addStretch()
+
+        refresh_btn = QPushButton("Verileri Yenile")
+        refresh_btn.setFixedWidth(150)
+        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        refresh_btn.clicked.connect(self.refresh_data)
+
+        top_bar_layout.addWidget(refresh_btn)
+        layout.addLayout(top_bar_layout)
+
         # --- Üst Kartlar ---
         cards_layout = QHBoxLayout()
         cards_layout.setSpacing(25)
@@ -2473,11 +2486,7 @@ class DashboardPage(QWidget):
         self.value_chart.clicked.connect(lambda: self.open_chart_detail(self.value_chart))
 
         # --- Alt Bilgi ---
-        refresh_btn = QPushButton("Verileri Yenile")
-        refresh_btn.setFixedWidth(150)
-        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        refresh_btn.clicked.connect(self.refresh_data)
-        layout.addWidget(refresh_btn, alignment=Qt.AlignmentFlag.AlignRight)
+
 
         # Widget'ı ScrollArea'ya ata
         scroll_area.setWidget(content_widget)
@@ -2622,167 +2631,366 @@ class DashboardPage(QWidget):
 class TourOverlay(QWidget):
     """
     Ekranı karartıp belirli bir widget'ı vurgulayan (spotlight) ve
-    yanında açıklama kutusu gösteren interaktif tur katmanı.
+    yanında açıklama kutusu gösteren modern interaktif tur katmanı.
     """
+
+    # Animasyon için özel özellik tanımlıyoruz
+    def get_spotlight_rect(self):
+        return self._current_spotlight_rect
+
+    def set_spotlight_rect(self, rect):
+        self._current_spotlight_rect = rect
+        self.update() # Her karede yeniden çiz
+
+    # PyQt Property tanımı (Animation Framework için)
+    spotlight_rect = pyqtProperty(QRectF, get_spotlight_rect, set_spotlight_rect)
 
     def __init__(self, parent_window, steps):
         super().__init__(parent_window)
         self.parent_window = parent_window
         self.steps = steps
         self.current_step_index = 0
+        
+        # Animasyon Başlangıç Değeri
+        self._current_spotlight_rect = QRectF(self.rect().center().x(), self.rect().center().y(), 0, 0)
+        
+        # --- ANİMASYON GRUBU ---
+        self.anim_group = QParallelAnimationGroup(self)
+        
+        # 1. Spotlight Animasyonu
+        self.anim_spotlight = QPropertyAnimation(self, b"spotlight_rect")
+        self.anim_spotlight.setDuration(600) 
+        self.anim_spotlight.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        
+        self.anim_group.addAnimation(self.anim_spotlight)
 
         # Tam ekran kapla
         self.setGeometry(parent_window.rect())
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)  # Fareyi yakala
         self.setMouseTracking(True)
 
-        # Bilgi Kutusu Widget'ı
+        # --- BİLGİ KUTUSU (INFO BOX) ---
         self.info_box = QFrame(self)
+        self.info_box.setObjectName("tourInfoBox")
+        
+        # 2. Kutu Pozisyon Animasyonu
+        self.anim_box = QPropertyAnimation(self.info_box, b"pos")
+        self.anim_box.setDuration(600)
+        self.anim_box.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        
+        self.anim_group.addAnimation(self.anim_box)
+        
+        # Gölge Efekti
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(25)
+        shadow.setXOffset(0)
+        shadow.setYOffset(8)
+        shadow.setColor(QColor(0, 0, 0, 80))
+        self.info_box.setGraphicsEffect(shadow)
+
+        # Stil Tanımları (QSS)
         self.info_box.setStyleSheet("""
-            QFrame { 
-                background-color: #f8fafc; 
-                border-radius: 8px; 
-                border: 1px solid #cbd5e1;
+            QFrame#tourInfoBox { 
+                background-color: #ffffff; 
+                border-radius: 12px; 
+                border: 1px solid #e2e8f0;
             }
-            QLabel#tourTitle { color: #0f172a; font-weight: bold; font-size: 16px; }
-            QLabel#tourDesc { color: #334155; font-size: 13px; }
+            QLabel#tourTitle { 
+                color: #0f172a; 
+                font-weight: 800; 
+                font-size: 18px; 
+                margin-bottom: 5px;
+            }
+            QLabel#tourDesc { 
+                color: #475569; 
+                font-size: 14px; 
+                line-height: 1.4;
+            }
+            QLabel#tourCounter {
+                color: #94a3b8;
+                font-size: 11px;
+                font-weight: 600;
+            }
             QPushButton { 
-                background-color: #3b82f6; color: white; border: none; 
-                padding: 6px 12px; border-radius: 4px; font-weight: bold;
+                border-radius: 6px; 
+                font-weight: 600;
+                font-size: 13px;
+                padding: 8px 16px;
             }
-            QPushButton:hover { background-color: #2563eb; }
-            QPushButton#closeBtn { background-color: transparent; color: #64748b; font-weight: normal; }
+            QPushButton#nextBtn {
+                background-color: #3b82f6; 
+                color: white; 
+                border: none;
+            }
+            QPushButton#nextBtn:hover { background-color: #2563eb; }
+            QPushButton#nextBtn:pressed { background-color: #1d4ed8; }
+            
+            QPushButton#prevBtn {
+                background-color: transparent; 
+                color: #64748b; 
+                border: 1px solid transparent;
+            }
+            QPushButton#prevBtn:hover { color: #334155; background-color: #f1f5f9; }
+            
+            QPushButton#closeBtn {
+                background-color: transparent;
+                color: #cbd5e1;
+                border: none;
+                font-size: 16px;
+                font-weight: bold;
+            }
             QPushButton#closeBtn:hover { color: #ef4444; }
         """)
 
-        # Info Box Layout
-        box_layout = QVBoxLayout(self.info_box)
+        # Layout
+        self.box_layout = QVBoxLayout(self.info_box)
+        self.box_layout.setContentsMargins(24, 20, 24, 24)
+        self.box_layout.setSpacing(12)
 
+        # Üst Kısım
+        top_layout = QHBoxLayout()
+        self.lbl_counter = QLabel("ADIM 1 / 5")
+        self.lbl_counter.setObjectName("tourCounter")
+        
+        self.btn_close_top = QPushButton("×")
+        self.btn_close_top.setObjectName("closeBtn")
+        self.btn_close_top.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close_top.setFixedSize(30, 30)
+        self.btn_close_top.clicked.connect(self.close_tour)
+        
+        top_layout.addWidget(self.lbl_counter)
+        top_layout.addStretch()
+        top_layout.addWidget(self.btn_close_top)
+        
+        # İçerik
         self.lbl_title = QLabel()
         self.lbl_title.setObjectName("tourTitle")
+        self.lbl_title.setWordWrap(True)
+        
         self.lbl_desc = QLabel()
         self.lbl_desc.setObjectName("tourDesc")
         self.lbl_desc.setWordWrap(True)
+        self.lbl_desc.setMinimumHeight(60) 
 
-        # Butonlar
+        # Alt Butonlar
         btn_layout = QHBoxLayout()
-        self.btn_close = QPushButton("Turu Bitir")
-        self.btn_close.setObjectName("closeBtn")
-        self.btn_close.clicked.connect(self.close_tour)
-
+        btn_layout.setSpacing(10)
+        
         self.btn_prev = QPushButton("Geri")
+        self.btn_prev.setObjectName("prevBtn")
+        self.btn_prev.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_prev.clicked.connect(self.prev_step)
-        self.btn_next = QPushButton("İleri")
+        
+        self.btn_next = QPushButton("İlerle")
+        self.btn_next.setObjectName("nextBtn")
+        self.btn_next.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_next.clicked.connect(self.next_step)
-
-        btn_layout.addWidget(self.btn_close)
-        btn_layout.addStretch()
+        
         btn_layout.addWidget(self.btn_prev)
+        btn_layout.addStretch()
         btn_layout.addWidget(self.btn_next)
 
-        box_layout.addWidget(self.lbl_title)
-        box_layout.addWidget(self.lbl_desc)
-        box_layout.addLayout(btn_layout)
+        # Hepsini Birleştir
+        self.box_layout.addLayout(top_layout)
+        self.box_layout.addWidget(self.lbl_title)
+        self.box_layout.addWidget(self.lbl_desc)
+        self.box_layout.addStretch() 
+        self.box_layout.addLayout(btn_layout)
 
-        self.info_box.setFixedWidth(300)
+        self.info_box.setFixedWidth(360) 
+        # Yüksekliği içeriğe göre ayarlasın ama min biraz olsun
 
-        # İlk adımı yükle
-        self.show_step()
+        # İlk adımı yükle (Biraz gecikmeli ki layout otursun)
+        self.center_info_box() # Başlangıçta ortada olsun
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(100, self.show_step)
         self.show()
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # 1. Yarı saydam siyah arka plan
-        painter.setBrush(QColor(0, 0, 0, 150))
+        # 1. Tam ekran yarı saydam arka plan
+        painter.setBrush(QColor(15, 23, 42, 180)) 
         painter.setPen(Qt.PenStyle.NoPen)
-        # Tüm ekranı boya
+        
         full_region = self.rect()
 
-        # Hedef widget'ı bul
-        step_data = self.steps[self.current_step_index]
-        target_widget = step_data.get('widget')
-
-        if target_widget and target_widget.isVisible():
-            # Widget'ın global pozisyonunu bul ve overlay'e göre çevir
-            global_pos = target_widget.mapToGlobal(QPoint(0, 0))
-            local_pos = self.mapFromGlobal(global_pos)
-
-            target_rect = QRectF(local_pos.x(), local_pos.y(), target_widget.width(), target_widget.height())
-
-            # Highlight (Spotlight) oluşturmak için Path kullanıyoruz
-            path = QPainterPath()
-            path.addRect(QRectF(full_region))
-            # Oyuk aç (Dikdörtgen yerine hafif yuvarlak köşeli oyuk daha şık)
-            path.addRoundedRect(target_rect.adjusted(-5, -5, 5, 5), 8, 8)
-
-            # FillRule.OddEvenFill, iç içe şekillerde ortayı boş bırakır
-            path.setFillRule(Qt.FillRule.OddEvenFill)
-
-            painter.drawPath(path)
-
-            # Vurgu çerçevesi çiz
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(QColor("#3b82f6"), 2))
-            painter.drawRoundedRect(target_rect.adjusted(-5, -5, 5, 5), 8, 8)
-
-            # Info Box konumunu güncelle
-            self.position_info_box(target_rect)
-
-        else:
-            # Hedef yoksa sadece ortada göster
+        # --- SPOTLIGHT EFEKTİ (Hole) ---
+        # Artık animasyonlu özelliği kullanıyoruz: self._current_spotlight_rect
+        focus_rect = self._current_spotlight_rect
+        
+        # Eğer rect çok küçükse
+        if focus_rect.width() < 5 or focus_rect.height() < 5:
             painter.drawRect(full_region)
-            self.info_box.move(
-                (self.width() - self.info_box.width()) // 2,
-                (self.height() - self.info_box.height()) // 2
-            )
+            return
 
-    def position_info_box(self, target_rect):
-        # Kutuyu hedefin yanına, altına veya üstüne koymaya çalış
+        path = QPainterPath()
+        path.addRect(QRectF(full_region))
+        path.addRoundedRect(focus_rect, 10, 10) # Köşeler yuvarlatılmış
+        path.setFillRule(Qt.FillRule.OddEvenFill)
+        painter.drawPath(path)
+
+        # --- VURGU ÇERÇEVESİ ---
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        
+        # Glow efekti için kalın, yarı saydam kalem
+        glow_pen = QPen(QColor(59, 130, 246, 120), 6) # Mavi glow
+        painter.setPen(glow_pen)
+        painter.drawRoundedRect(focus_rect, 10, 10)
+        
+        # Keskin iç çizgi
+        sharp_pen = QPen(QColor(59, 130, 246), 2)
+        painter.setPen(sharp_pen)
+        painter.drawRoundedRect(focus_rect, 10, 10)
+
+        # DİKKAT: Artık paint içinde box'ı hareket ettirmiyoruz!
+        # Animasyon bunu hallediyor.
+
+
+    def calculate_box_position(self, target_rect):
+        """Kutuyu akıllıca konumlandır"""
         box_w = self.info_box.width()
         box_h = self.info_box.height()
+        margin = 20
+        
+        # Ekran boyutları
+        sw = self.width()
+        sh = self.height()
 
-        # Varsayılan: Hedefin sağında
-        x = target_rect.right() + 20
+        # Varsayılan: Hedefin SAĞINDA
+        x = target_rect.right() + margin
         y = target_rect.top()
 
-        # Eğer sağa sığmazsa, sola koy
-        if x + box_w > self.width():
-            x = target_rect.left() - box_w - 20
+        # Sağa sığmıyorsa SOLA al
+        if x + box_w > sw - margin:
+            x = target_rect.left() - box_w - margin
+        
+        # Sola da sığmıyorsa (mobil/dar ekran) veya çok dar alan varsa AŞAĞI al
+        if x < margin or (target_rect.width() > sw * 0.6):
+            x = max(margin, target_rect.left()) # Hizala
+            y = target_rect.bottom() + margin
+            
+            # Aşağı sığmıyorsa YUKARI al (veya ortala)
+            if y + box_h > sh - margin:
+                y = target_rect.top() - box_h - margin
 
-        # Eğer sola da sığmazsa (mobil vs), alta koy
-        if x < 0:
-            x = target_rect.left()
-            y = target_rect.bottom() + 20
+        # Dikey taşma kontrolü (Ekran dışına çıkmasın)
+        if y + box_h > sh - margin:
+            y = sh - box_h - margin
+        if y < margin:
+            y = margin
+        
+        # Yatay taşma kontrolü
+        if x + box_w > sw - margin:
+            x = sw - box_w - margin
+        if x < margin:
+            x = margin
 
-        # Dikey taşmayı kontrol et
-        if y + box_h > self.height():
-            y = self.height() - box_h - 20
+        return QPoint(int(x), int(y))
 
-        self.info_box.move(int(x), int(y))
+    def center_info_box(self):
+        # Bu da artık animasyonla olabilir ama şimdilik direct set
+        target_pos = QPoint(
+            (self.width() - self.info_box.width()) // 2,
+            (self.height() - self.info_box.height()) // 2
+        )
+        self.info_box.move(target_pos)
 
     def show_step(self):
         step = self.steps[self.current_step_index]
         self.lbl_title.setText(step['title'])
         self.lbl_desc.setText(step['desc'])
+        
+         # Sayaç Güncelle
+        total = len(self.steps)
+        self.lbl_counter.setText(f"ADIM {self.current_step_index + 1} / {total}")
+        
+        self.info_box.adjustSize()
 
-        # Sayfa Değişimi Gerekirse
+        # Sayfa Değişimi Kontrolü
+        page_changed = False
         if 'page_index' in step:
-            # Ana pencerenin metoduyla sayfa değiştir
-            # parent_window.nav_list'e erişip değiştirebiliriz
-            self.parent_window.nav_list.setCurrentRow(step['page_index'])
-            # Render döngüsünün widget'ı çizmesini bekle
-            QApplication.processEvents()
+            current_row = self.parent_window.nav_list.currentRow()
+            if current_row != step['page_index']:
+                self.parent_window.nav_list.setCurrentRow(step['page_index'])
+                page_changed = True
 
-        # Buton durumları
+        # HEDEF HESAPLAMA VE ANİMASYON BAŞLATMA
+        # Layout'un oturması için eğer sayfa değiştiyse biraz beklememiz gerekebilir.
+        # Bu yüzden asıl hesaplamayı bir sonraki event loop'a veya QTimer'a bırakıyoruz.
+        
+        from PyQt6.QtCore import QTimer
+        # Eğer sayfa değiştiyse 150ms bekle, değişmediyse hemen (10ms)
+        delay = 150 if page_changed else 10
+        QTimer.singleShot(delay, self._animate_to_target)
+
+        # Buton Durumları
         self.btn_prev.setEnabled(self.current_step_index > 0)
+        self.btn_prev.setVisible(self.current_step_index > 0)
+        
         if self.current_step_index == len(self.steps) - 1:
-            self.btn_next.setText("Bitir")
+            self.btn_next.setText("Turu Tamamla")
+            self.btn_next.setStyleSheet("""
+                QPushButton#nextBtn {
+                    background-color: #10b981; color: white; border: none;
+                }
+                QPushButton#nextBtn:hover { background-color: #059669; }
+            """)
         else:
-            self.btn_next.setText("İleri")
+            self.btn_next.setText("Sıradaki")
+            self.btn_next.setStyleSheet("""
+                QPushButton#nextBtn {
+                   background-color: #3b82f6; color: white; border: none;
+                }
+                QPushButton#nextBtn:hover { background-color: #2563eb; }
+            """)
 
-        self.update()  # Repaint triggers
+    def _animate_to_target(self):
+        """Asıl hedefi bulup animasyon grubunu başlatır"""
+        step = self.steps[self.current_step_index]
+        target_widget = step.get('widget')
+
+        # Başlangıç değerleri (Mevcut durum)
+        start_rect = self._current_spotlight_rect
+        start_pos = self.info_box.pos()
+
+        # Bitiş değerlerini hesapla
+        end_rect = QRectF(self.rect().center().x(), self.rect().center().y(), 0, 0) # Fallback: Center (hidden)
+        end_pos = QPoint(
+            (self.width() - self.info_box.width()) // 2,
+            (self.height() - self.info_box.height()) // 2
+        )
+
+        if target_widget and target_widget.isVisible():
+             try:
+                # Koordinat hesapla
+                global_pos = target_widget.mapToGlobal(QPoint(0, 0))
+                local_pos = self.mapFromGlobal(global_pos)
+                
+                # Hedef rect
+                w = target_widget.width()
+                h = target_widget.height()
+                padding = 6
+                
+                # Eğer widget çok küçükse veya hatalıysa kontrol et
+                if w > 0 and h > 0:
+                     end_rect = QRectF(local_pos.x(), local_pos.y(), w, h).adjusted(-padding, -padding, padding, padding)
+                     end_pos = self.calculate_box_position(end_rect)
+             except RuntimeError:
+                 # Widget silinmiş olabilir
+                 pass
+        
+        # Animasyonları ayarla
+        self.anim_group.stop()
+        
+        self.anim_spotlight.setStartValue(start_rect)
+        self.anim_spotlight.setEndValue(end_rect)
+        
+        self.anim_box.setStartValue(start_pos)
+        self.anim_box.setEndValue(end_pos)
+        
+        self.anim_group.start()
 
     def next_step(self):
         if self.current_step_index < len(self.steps) - 1:
@@ -2843,7 +3051,8 @@ class AnaPencere(QMainWindow):
         logo_icon = QLabel()
         logo_icon.setObjectName("logoIcon")
         try:
-            logo_pixmap = QPixmap("StockFlow_Logo.png")
+            logo_path = dosya_yolunu_bul("StockFlow_Logo.png")
+            logo_pixmap = QPixmap(logo_path)
             if not logo_pixmap.isNull():
                 logo_icon.setPixmap(logo_pixmap.scaled(200, 300, Qt.AspectRatioMode.KeepAspectRatio,
                                                        Qt.TransformationMode.SmoothTransformation))
@@ -2851,8 +3060,9 @@ class AnaPencere(QMainWindow):
             else:
                 raise FileNotFoundError
         except FileNotFoundError:
-            logo_icon.setText("📦")
-            logo_icon.setStyleSheet("font-size: 24px; padding: 0; margin: 0;")
+            # Emoji kaldırıldı, yerine metin
+            logo_icon.setText("StockFlow")
+            logo_icon.setStyleSheet("font-size: 24px; font-weight: bold; color: #94a3b8; padding: 10px; margin: 0;")
 
         logo_layout = QHBoxLayout()
         logo_layout.addWidget(logo_icon)
@@ -3449,8 +3659,7 @@ class BaseAuthWindow(QDialog):
         logo_icon = QLabel()
         logo_icon.setObjectName("logoIcon")
         try:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            logo_path = os.path.join(script_dir, "StockFlow_Logo.png")
+            logo_path = dosya_yolunu_bul("StockFlow_Logo.png")
             logo_pixmap = QPixmap(logo_path)
             if not logo_pixmap.isNull():
                 # Logonun tam görünmesi için genişliği 400 yaptık
@@ -3460,8 +3669,8 @@ class BaseAuthWindow(QDialog):
             else:
                 raise FileNotFoundError
         except FileNotFoundError:
-            logo_icon.setText("SF")
-            logo_icon.setStyleSheet("font-size: 48px; qproperty-alignment: AlignCenter;")
+            logo_icon.setText("STOCKFLOW")
+            logo_icon.setStyleSheet("font-size: 32px; font-weight: bold; color: #3b82f6; qproperty-alignment: AlignCenter;")
 
         logo_layout.addWidget(logo_icon)
         self.ana_layout.addLayout(logo_layout)
@@ -3913,6 +4122,10 @@ if __name__ == "__main__":
     sys.excepthook = exception_hook
 
     # 1. Uygulamayı Başlat
+    # --- DPI ÖLÇEKLENDİRME AYARLARI (Scaling Fix) ---
+    os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
+    QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    
     app = QApplication(sys.argv)
     app.setStyleSheet(stil_olustur(False))
 
