@@ -10,6 +10,23 @@ from datetime import datetime, date
 import certifi
 os.environ['SSL_CERT_FILE'] = certifi.where()
 
+"""
+Proje: StockFlow Stok Takip Sistemi
+Sürüm: 2.1.0
+
+Açıklama:
+    Bu modül, StockFlow uygulamasının ana giriş noktasıdır. PyQt6 kütüphanesi kullanılarak
+    geliştirilen bu masaüstü uygulaması, küçük ve orta ölçekli işletmeler için
+    kapsamlı stok takibi, satış yönetimi ve raporlama özellikleri sunar.
+
+    Temel Özellikler:
+    - SQLite tabanlı yerel veritabanı yönetimi
+    - Firebase Realtime Database ile bulut yedekleme ve senkronizasyon
+    - Dinamik grafikler ve veri görselleştirme (Matplotlib alternatifi custom widgetlar)
+    - Kullanıcı yetkilendirme ve işlem loglama sistemi
+    - Excel/CSV formatında raporlama
+"""
+
 # --- ÜÇÜNCÜ PARTİ KÜTÜPHANELER ---
 try:
     from plyer import notification
@@ -75,23 +92,58 @@ DB_NAME = "stok_veritabani.db"
 # =============================================================================
 
 class NumericTableWidgetItem(QTableWidgetItem):
-    """Sayısal sıralama için özelleştirilmiş tablo öğesi."""
+    """
+    Kullanıcı arayüzünde sayısal verilerin (Fiyat, Miktar vb.) doğru sıralanması
+    için kullanılan özelleştirilmiş tablo hücresi sınıfıdır.
+    
+    Normal QTableWidgetItem metin tabanlı sıralama yapar (Örn: "100" < "20"),
+    bu sınıf ise sayısal büyüklüğe göre sıralamayı garanti eder.
+    """
 
     def __init__(self, display_text, sort_key):
+        """
+        Yapıcı Metot (Constructor).
+
+        Args:
+            display_text (str): Ekranda görünecek metin (örn: "120.50₺").
+            sort_key (float/int): Sıralamada baz alınacak gerçek sayısal değer (örn: 120.50).
+        """
         super().__init__(display_text)
         self.sort_key = sort_key
 
     def __lt__(self, other):
+        """
+        Küçüktür (<) operatörünün aşırı yüklenmesi (Operator Overloading).
+        Python'un sıralama algoritmaları (sort) tarafından kullanılır.
+        """
         if isinstance(other, NumericTableWidgetItem):
             return self.sort_key < other.sort_key
         return super().__lt__(other)
 
 
 class VeritabaniYoneticisi:
-    """Uygulama için tüm veritabanı işlemlerini yönetir."""
+    """
+    Veritabanı Yönetim Sınıfı (Database Manager)
+
+    Uygulamanın SQLite veritabanı ile olan tüm etkileşimlerini (CRUD işlemleri) yönetir.
+    Singleton tasarım desenine benzer şekilde, uygulama genelinde veritabanı erişimi
+    bu sınıf üzerinden sağlanır.
+
+    Görevleri:
+    - Veritabanı bağlantısını kurmak ve sürdürmek.
+    - Tablo yapısını oluşturmak ve versiyon geçişlerini (migrasyon) yönetmek.
+    - Ürün, stok, kullanıcı ve raporlama sorgularını işlemek.
+    """
 
     def __init__(self, db_adi=DB_NAME):
+        """
+        Veritabanı bağlantısını başlatır ve gerekli tabloları kontrol eder.
+
+        Args:
+            db_adi (str): Veritabanı dosyasının adı. Varsayılan: stok_veritabani.db
+        """
         self.baglanti = sqlite3.connect(db_adi, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+        # Foreign Key desteğini aktifleşitir
         self.baglanti.execute("PRAGMA foreign_keys = ON")
         self.cursor = self.baglanti.cursor()
         self.tablolari_olustur()
@@ -148,32 +200,46 @@ class VeritabaniYoneticisi:
             pass
 
     def tablolari_olustur(self):
+        """
+        Veritabanı tablolarını yoksa oluşturur (IF NOT EXISTS).
+        
+        Tablolar:
+        1. urunler: Stoktaki ürünlerin detayları (master tablo).
+        2. kullanicilar: Sisteme giriş yapacak yetkili hesaplar.
+        3. stok_hareketleri: Ürün giriş-çıkış logları (transaction log).
+        """
+        # Ürünler tablelosu
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS urunler (
                 id INTEGER PRIMARY KEY,
-                urun_kodu TEXT UNIQUE NOT NULL,
+                urun_kodu TEXT UNIQUE NOT NULL,      -- Benzersiz Barkod/Kod
                 ad TEXT NOT NULL,
                 kategori TEXT,
                 fiyat REAL NOT NULL DEFAULT 0.0,
                 miktar REAL NOT NULL,
                 birim TEXT NOT NULL DEFAULT 'adet',
-                min_stok REAL NOT NULL DEFAULT 10,
-                baslangic_miktari REAL,
+                min_stok REAL NOT NULL DEFAULT 10,  -- Kritik stok uyarısı için eşik
+                baslangic_miktari REAL,              -- Doluluk barı hesabı için
                 son_kullanma_tarihi TEXT,
-                resim_yolu TEXT
+                resim_yolu TEXT,
+                aktif INTEGER DEFAULT 1              -- Soft delete için (1: Aktif, 0: Silinmiş)
             )""")
+        
+        # Kullanıcılar tablosu
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS kullanicilar (
                 id INTEGER PRIMARY KEY,
                 kullanici_adi TEXT NOT NULL UNIQUE,
-                sifre_hash TEXT NOT NULL
+                sifre_hash TEXT NOT NULL             -- SHA-256 ile hashlenmiş şifre
             )""")
+            
+        # Stok Hareketleri (Log) tablosu
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS stok_hareketleri (
                 id INTEGER PRIMARY KEY,
                 urun_id INTEGER,
                 kullanici_adi TEXT,
-                islem_tipi TEXT NOT NULL, 
+                islem_tipi TEXT NOT NULL,            -- Örn: 'STOK EKLEME', 'STOK ÇIKIŞI' 
                 miktar_degisimi REAL NOT NULL,
                 yeni_miktar REAL,
                 tarih TIMESTAMP,
@@ -185,6 +251,10 @@ class VeritabaniYoneticisi:
 
     def _stok_hareketi_kaydet(self, urun_id, kullanici_adi, islem_tipi, miktar_degisimi, yeni_miktar, notlar="",
                               satis_fiyati=None):
+        """
+        Dahili Metot: Bir stok işlemini log tablosuna kaydeder.
+        Bu metot, veri bütünlüğü için her ekleme/silme işleminden sonra otomatik çağrılır.
+        """
         try:
             guncel_tarih = datetime.now()
             self.cursor.execute("""
@@ -195,35 +265,54 @@ class VeritabaniYoneticisi:
             print(f"Stok hareketi kaydedilemedi: {e}")
 
     def urunleri_getir(self):
-        # Sadece aktif=1 olanları getiriyoruz
+        """Aktif (silinmemiş) tüm ürünlerin listesini ürün adına göre sıralı getirir."""
+        # Sadece aktif=1 olanları getiriyoruz (Soft delete filtresi)
         self.cursor.execute(
             "SELECT id, urun_kodu, ad, kategori, fiyat, miktar, birim, min_stok, baslangic_miktari, son_kullanma_tarihi FROM urunler WHERE aktif = 1 ORDER BY ad ASC")
         return self.cursor.fetchall()
 
     def dusuk_stok_urunleri_getir(self):
+        """Stok miktarı, minimum stok seviyesinin (eşik) altına düşen ürünleri raporlar."""
         self.cursor.execute(
-            "SELECT id, urun_kodu, ad, kategori, fiyat, miktar, birim, min_stok FROM urunler WHERE miktar <= min_stok ORDER BY ad ASC")
+            "SELECT id, urun_kodu, ad, kategori, fiyat, miktar, birim, min_stok FROM urunler WHERE miktar <= min_stok AND aktif = 1 ORDER BY ad ASC")
         return self.cursor.fetchall()
 
     def urun_detay_getir(self, urun_id):
+        """Belirli bir ürünün ID'sine göre tüm detaylarını çeker."""
         self.cursor.execute(
             "SELECT id, urun_kodu, ad, kategori, fiyat, miktar, birim, min_stok, son_kullanma_tarihi FROM urunler WHERE id = ?",
             (urun_id,))
         return self.cursor.fetchone()
 
     def urun_ekle(self, urun_kodu, ad, kategori, fiyat, miktar, birim, min_stok, skt_tarihi, kullanici_adi):
+        """
+        Yeni bir stok kartı oluşturur veya mevcut ürün varsa stoğunu artırır.
+
+        Args:
+            urun_kodu (str): Ürüne ait benzersiz barkod veya kod.
+            ad (str): Ürün adı.
+            kategori (str): Ürün kategorisi.
+            fiyat (float): Alış maliyeti.
+            miktar (float): Eklenecek miktar.
+            ...
+
+        Returns:
+            tuple: (Basari_Durumu (bool), Mesaj (str))
+        """
         self.cursor.execute("SELECT id, miktar FROM urunler WHERE urun_kodu = ?", (urun_kodu,))
         mevcut = self.cursor.fetchone()
 
         if mevcut:
+            # Ürün zaten varsa: Miktarını güncelle (UPDATE)
             urun_id, mevcut_miktar = mevcut
             yeni_miktar = mevcut_miktar + miktar
-            self.cursor.execute("UPDATE urunler SET miktar = ?, baslangic_miktari = baslangic_miktari + ? WHERE id = ?",
+            self.cursor.execute("UPDATE urunler SET miktar = ?, baslangic_miktari = baslangic_miktari + ?, aktif = 1 WHERE id = ?",
                                 (yeni_miktar, miktar, urun_id))
             self._stok_hareketi_kaydet(urun_id, kullanici_adi, "STOK EKLEME", miktar, yeni_miktar, "Formdan eklendi")
             self.baglanti.commit()
             return True, f"Mevcut '{urun_kodu}' kodlu ürünün stoğu güncellendi. (SKT Değişmedi)"
         else:
+            # Ürün yoksa: Yeni kayıt oluştur (INSERT)
             try:
                 self.cursor.execute("""
                     INSERT INTO urunler (urun_kodu, ad, kategori, fiyat, miktar, birim, min_stok, baslangic_miktari, son_kullanma_tarihi, aktif)
@@ -242,15 +331,19 @@ class VeritabaniYoneticisi:
                 return False, f"Bir hata oluştu: {e}"
 
     def urun_detay_guncelle(self, urun_id, yeni_ad, kategori, fiyat, birim, min_stok, yeni_skt, kullanici_adi):
+        """Mevcut bir ürünün (stok miktarı hariç) diğer bilgilerini günceller."""
         try:
             self.cursor.execute("""
                 UPDATE urunler 
                 SET ad = ?, kategori = ?, fiyat = ?, birim = ?, min_stok = ?, son_kullanma_tarihi = ?
                 WHERE id = ?
             """, (yeni_ad.upper(), kategori.upper(), fiyat, birim, min_stok, yeni_skt, urun_id))
+            
             notlar = f"Detaylar güncellendi (Birim: {birim}, MinStok: {min_stok}, SKT: {yeni_skt})"
             self.cursor.execute("SELECT miktar FROM urunler WHERE id = ?", (urun_id,))
-            mevcut_miktar = self.cursor.fetchone()[0]
+            result = self.cursor.fetchone()
+            mevcut_miktar = result[0] if result else 0
+            
             self._stok_hareketi_kaydet(urun_id, kullanici_adi, "DETAY GÜNCELLEME", 0, mevcut_miktar, notlar)
             self.baglanti.commit()
             return True, "Güncellendi"
@@ -259,6 +352,12 @@ class VeritabaniYoneticisi:
             return False, f"Hata: {e}"
 
     def urun_miktar_guncelle(self, urun_id, miktar_farki, kullanici_adi, satis_fiyati=None):
+        """
+        Stok artırma veya azaltma işlemlerini yönetir.
+        
+        Args:
+            miktar_farki: (+5 ekleme, -3 çıkarma gibi)
+        """
         self.cursor.execute("SELECT miktar, baslangic_miktari FROM urunler WHERE id = ?", (urun_id,))
         sonuc = self.cursor.fetchone()
         if not sonuc: return False, "Ürün bulunamadı."
@@ -268,20 +367,20 @@ class VeritabaniYoneticisi:
 
         if yeni_miktar < 0: return False, "Stok eksiye düşemez."
 
-        # --- GÜNCELLENEN KISIM: Soft Delete (Pasife Çekme) ---
+        # --- Soft Delete (Pasife Çekme) Kontrolü ---
         if yeni_miktar == 0:
             islem_tipi = "STOK ÇIKIŞI" if miktar_farki < 0 else "STOK GÜNCELLEME"
             # Notlara "OTOMATİK SİLİNDİ" yazıyoruz ki geri alırken anlayabilelim
             self._stok_hareketi_kaydet(urun_id, kullanici_adi, islem_tipi, miktar_farki, 0,
                                        "Stok bitti, ürün arşivlendi (Pasif).", satis_fiyati)
 
-            # DELETE yerine UPDATE kullanıyoruz
+            # Stok 0 olunca ürünü pasife çekiyoruz (aktif=0)
             self.cursor.execute("UPDATE urunler SET miktar = 0, aktif = 0 WHERE id = ?", (urun_id,))
             self.baglanti.commit()
             return True, "Ürün tükendiği için listeden kaldırıldı (Geçmişte görünür)."
-        # -----------------------------------------------------
-
-        yeni_baslangic = max(mevcut_baslangic, yeni_miktar)
+        
+        # --- Normal Güncelleme ---
+        yeni_baslangic = max(mevcut_baslangic, yeni_miktar) # Barın bozulmaması için
         self.cursor.execute("UPDATE urunler SET miktar = ?, baslangic_miktari = ?, aktif = 1 WHERE id = ?",
                             (yeni_miktar, yeni_baslangic, urun_id))
 
@@ -292,6 +391,10 @@ class VeritabaniYoneticisi:
         return True, "Miktar güncellendi."
 
     def urun_sil(self, urun_id, kullanici_adi):
+        """
+        Ürünü veritabanından tamamen silmek yerine 'soft delete' uygular.
+        Ürün arşivlenir ve listelerde görünmez, ancak geçmiş hareketlerde referansı korunur.
+        """
         mevcut_miktar = self.mevcut_miktar_getir(urun_id)
         self._stok_hareketi_kaydet(urun_id, kullanici_adi, "ÜRÜN SİLME", -mevcut_miktar, 0, "Kullanıcı sildi (Pasif)")
         # Tamamen silmek yerine pasife çekiyoruz
@@ -299,6 +402,7 @@ class VeritabaniYoneticisi:
         self.baglanti.commit()
 
     def mevcut_miktar_getir(self, urun_id):
+        """Belirtilen ürünün anlık stok miktarını sorgular."""
         self.cursor.execute("SELECT miktar FROM urunler WHERE id = ?", (urun_id,))
         sonuc = self.cursor.fetchone()
         return sonuc[0] if sonuc else 0
@@ -320,6 +424,10 @@ class VeritabaniYoneticisi:
             print(f"Kullanıcı yükleme hatası ({k_adi}): {e}")
 
     def urun_hucre_guncelle(self, urun_id, sutun_adi, yeni_deger, kullanici_adi):
+        """
+        Tablo üzerinden yapılan hızlı düzenlemeleri (Inline Editing) veritabanına işler.
+        Sadece 'kategori' ve 'fiyat' alanlarının bu şekilde güncellenmesine izin verilir.
+        """
         izin_verilen_sutunlar = ['kategori', 'fiyat']
         if sutun_adi not in izin_verilen_sutunlar: return False, "Geçersiz güncelleme alanı."
         try:
@@ -335,6 +443,12 @@ class VeritabaniYoneticisi:
             return False, f"Veritabanı hatası: {e}"
 
     def stok_hareketlerini_getir(self, zaman_araligi='tumu'):
+        """
+        Geçmiş stok işlemlerini (Logları) belirli bir zaman aralığına göre filtreleyerek getirir.
+        
+        Args:
+            zaman_araligi (str): 'haftalik', 'aylik' veya 'tumu'.
+        """
         sorgu = """
             SELECT h.id, h.tarih, h.kullanici_adi, u.urun_kodu, u.ad, h.islem_tipi, h.miktar_degisimi, h.yeni_miktar, u.birim, h.notlar, h.satis_fiyati
             FROM stok_hareketleri h
@@ -349,6 +463,11 @@ class VeritabaniYoneticisi:
         return self.cursor.fetchall()
 
     def islem_geri_al(self, hareket_id, aktif_kullanici):
+        """
+        Yapılan hatalı bir stok işlemini geri alır (Undo).
+        Örneğin yanlışlıkla 5 adet eklendiyse, bu işlem geri alınarak 5 adet düşülür.
+        Eğer işlem sonucunda stok eksiye düşecekse geri almaya izin verilmez.
+        """
         self.cursor.execute("SELECT urun_id, miktar_degisimi, islem_tipi FROM stok_hareketleri WHERE id = ?",
                             (hareket_id,))
         hareket = self.cursor.fetchone()
@@ -381,6 +500,7 @@ class VeritabaniYoneticisi:
             return False, f"Hata: {e}"
 
     def en_cok_satanlari_getir(self, zaman_araligi='aylik'):
+        """En çok stok çıkışı yapılan (satılan) ürünleri çoktan aza sıralar."""
         zaman_kriteri = ""
         if zaman_araligi == 'haftalik':
             zaman_kriteri = "AND h.tarih >= date('now', '-7 day')"
@@ -399,6 +519,10 @@ class VeritabaniYoneticisi:
         return self.cursor.fetchall()
 
     def kar_zarar_raporu_getir(self, zaman_araligi='aylik'):
+        """
+        Satılan ürünlerin alış fiyatı ile satış fiyatı arasındaki farkı hesaplayarak
+        toplam ciro ve kar/zarar durumunu raporlar.
+        """
         zaman_kriteri = ""
         if zaman_araligi == 'haftalik':
             zaman_kriteri = "AND h.tarih >= date('now', '-7 day')"
@@ -419,8 +543,14 @@ class VeritabaniYoneticisi:
 
     def veritabanini_sifirla(self, kapsam='tumu', kullanici_adi=None):
         """
-        kapsam: 'gecmis' (sadece hareketler) veya 'tumu' (ürünler + hareketler).
-        Kullanıcılar tablosu güvenlik gereği silinmez.
+        Veritabanındaki verileri temizler (Fabrika Ayarları).
+        
+        Args:
+            kapsam (str): 
+                - 'gecmis': Sadece stok hareketlerini siler.
+                - 'tumu': Ürünleri ve hareketleri siler.
+        
+        Not: Kullanıcı hesapları güvenlik nedeniyle silinmez.
         """
         try:
             # 1. Ana verileri sil
@@ -451,6 +581,7 @@ class VeritabaniYoneticisi:
             return False, f"Sıfırlama hatası: {e}"
 
     def genel_bakis_getir(self):
+        """Dashboard ekranı için özet metrikleri (toplam değer, düşük stok vb.) hesaplar."""
         try:
             urun_cesidi = self.cursor.execute("SELECT COUNT(id) FROM urunler").fetchone()[0]
             toplam_stok_degeri = self.cursor.execute("SELECT SUM(fiyat * miktar) FROM urunler").fetchone()[0]
@@ -462,13 +593,16 @@ class VeritabaniYoneticisi:
             return {"urun_cesidi": 0, "toplam_deger": 0.0, "dusuk_stok": 0}
 
     def kullanici_sayisi_getir(self):
+        """Sisteme kayıtlı yetkili kullanıcı sayısını döner."""
         self.cursor.execute("SELECT COUNT(*) FROM kullanicilar")
         return self.cursor.fetchone()[0]
 
     def sifre_hashle(self, s):
+        """Şifreleri veritabanında açık halde saklamamak için SHA-256 ile şifreler."""
         return hashlib.sha256(s.encode()).hexdigest()
 
     def kullanici_ekle(self, k_adi, s):
+        """Yeni bir yönetici/kullanıcı hesabı oluşturur."""
         if not k_adi or not s: return False, "Kullanıcı adı ve şifre boş bırakılamaz."
         try:
             self.cursor.execute("INSERT INTO kullanicilar (kullanici_adi, sifre_hash) VALUES (?, ?)",
@@ -480,11 +614,13 @@ class VeritabaniYoneticisi:
             return False, "Bu kullanıcı adı zaten alınmış."
 
     def kullanici_dogrula(self, k_adi, s):
+        """Giriş ekranında girilen bilgilerin doğruluğunu kontrol eder."""
         self.cursor.execute("SELECT * FROM kullanicilar WHERE kullanici_adi = ? AND sifre_hash = ?",
                             (k_adi, self.sifre_hashle(s)))
         return self.cursor.fetchone() is not None
 
     def kullanici_bilgilerini_guncelle(self, e_kadi, y_kadi, y_sifre):
+        """Mevcut kullanıcının adını veya şifresini değiştirir."""
         try:
             self.cursor.execute("UPDATE kullanicilar SET kullanici_adi = ?, sifre_hash = ? WHERE kullanici_adi = ?",
                                 (y_kadi, self.sifre_hashle(y_sifre), e_kadi))
@@ -550,6 +686,10 @@ class FirebaseYedekleyici(QDialog):
         layout.addLayout(btn_layout)
 
     def baglanti_kur(self):
+        """
+        Firebase projesine authentication (kimlik doğrulama) yapar.
+        'firebase_key.json' dosyasını okur ve bağlantı nesnesini oluşturur.
+        """
         if not firebase_admin._apps:
             try:
                 cred = credentials.Certificate(self.json_dosya_adi)
@@ -566,6 +706,10 @@ class FirebaseYedekleyici(QDialog):
         return True
 
     def buluta_gonder(self):
+        """
+        Yerel veritabanındaki tüm verileri (Ürünler + Geçmiş + Kullanıcılar) 
+        JSON formatına çevirip Firebase'e yükler.
+        """
         if not self.baglanti_kur(): return
 
         self.status_lbl.setText("Veriler hazırlanıyor...")
@@ -640,6 +784,10 @@ class FirebaseYedekleyici(QDialog):
                 QMessageBox.critical(self, "Hata", f"Yedekleme hatası: {error_str}")
 
     def buluttan_cek(self):
+        """
+        Firebase üzerindeki yedekten verileri indirir ve yerel veritabanını günceller.
+        DİKKAT: Mevcut yerel verileri tamamen siler!
+        """
         if not self.baglanti_kur(): return
 
         msg = QMessageBox(self)
@@ -737,6 +885,10 @@ class FirebaseYedekleyici(QDialog):
 
 
 class SatisDialog(QDialog):
+    """
+    Hızlı satış işlemi için geliştirilmiş pop-up penceresidir.
+    Kullanıcıdan satış miktarını ve birim fiyatını alır.
+    """
     def __init__(self, urun_adi, mevcut_stok, birim, guncel_alis_fiyati, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Satış Yap")
@@ -776,6 +928,7 @@ class SatisDialog(QDialog):
         layout.addRow(self.buttonBox)
 
     def get_values(self):
+        """Kullanıcının girdiği miktar ve fiyat bilgisini döner."""
         try:
             miktar_text = self.input_miktar.text().replace(',', '.')
             fiyat_text = self.input_fiyat.text().replace(',', '.')
@@ -788,6 +941,10 @@ class SatisDialog(QDialog):
 
 
 class UrunDuzenlemeDialog(QDialog):
+    """
+    Mevcut bir ürünün detaylarını (Ad, Kategori, Fiyat vb.) düzenlemek için kullanılır.
+    Stok miktarı buradan değiştirilmez (güvenlik ve log takibi için), sadece kart bilgileri güncellenir.
+    """
     def __init__(self, urun_detaylari, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Ürün Bilgilerini Düzenle")
@@ -837,6 +994,7 @@ class UrunDuzenlemeDialog(QDialog):
         self.form_layout.addWidget(self.buttonBox)
 
     def get_data(self):
+        """Formdaki güncellenmiş verileri doğrular ve tuple olarak döner."""
         try:
             fiyat = float(self.fiyat_input.text().replace(',', '.'))
             min_stok = float(self.min_stok_input.text().replace(',', '.'))
@@ -854,6 +1012,10 @@ class UrunDuzenlemeDialog(QDialog):
 
 
 class YeniKullaniciDialog(QDialog):
+    """
+    Sisteme yeni yönetici/personel eklemek için kullanılan kayıt formu.
+    Şifre eşleşme kontrolü yapar ve veritabanına hashing ile kaydeder.
+    """
     def __init__(self, veritabani_yoneticisi, parent=None):
         super().__init__(parent)
         self.veritabani = veritabani_yoneticisi
@@ -953,6 +1115,10 @@ class YeniKullaniciDialog(QDialog):
 
 
 class FiltreDialog(QDialog):
+    """
+    Ana stok listesi için gelişmiş filtreleme seçenekleri sunar.
+    Fiyat aralığı, stok aralığı ve sadece düşük stokluları gösterme seçenekleri içerir.
+    """
     def __init__(self, mevcut_filtreler=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Gelişmiş Filtrele")
@@ -994,10 +1160,12 @@ class FiltreDialog(QDialog):
         self.reset_requested = False
 
     def filtreyi_temizle_ve_kapat(self):
+        """Tüm seçimleri sıfırlar ve filtreyi kaldırır."""
         self.reset_requested = True
         self.accept()
 
     def get_filtreler(self):
+        """Seçilen filtre kriterlerini bir sözlük olarak döndürür."""
         def to_float(widget):
             try:
                 return float(widget.text().replace(',', '.'))
@@ -1016,6 +1184,10 @@ class FiltreDialog(QDialog):
 # =============================================================================
 
 class KarZararSayfasi(QWidget):
+    """
+    İşletmenin kar/zarar durumunu analiz eden raporlama sayfasıdır.
+    Satışlardan elde edilen ciroyu ve maliyetleri karşılaştırarak net karı hesaplar.
+    """
     def __init__(self, veritabani_yoneticisi, parent=None):
         super().__init__(parent)
         self.veritabani = veritabani_yoneticisi
@@ -1023,6 +1195,7 @@ class KarZararSayfasi(QWidget):
         self.raporu_guncelle()
 
     def create_metric_card(self, parent_layout, title, value_id):
+        """Sayfanın üst kısmındaki özet bilgi kartlarını (Toplam Ciro vb.) oluşturur."""
         card_frame = QFrame()
         card_frame.setObjectName("metricCard")
         card_layout = QVBoxLayout(card_frame)
@@ -1081,6 +1254,7 @@ class KarZararSayfasi(QWidget):
             QLabel("Kâr Hesabı: (Satış Anındaki Fiyat - Güncel Alış Fiyatı) x Adet formülü ile hesaplanır."))
 
     def raporu_guncelle(self):
+        """Seçilen zaman aralığına göre veritabanından verileri çeker ve tabloyu yeniler."""
         self.tablo.setSortingEnabled(False)
         self.tablo.setRowCount(0)
         aralik = self.aralik_secimi.currentData()
@@ -1114,6 +1288,10 @@ class KarZararSayfasi(QWidget):
 
 
 class SatisRaporuSayfasi(QWidget):
+    """
+    En çok satan ürünleri listeleyen performans raporu sayfasıdır.
+    Hangi ürünün ne kadar sattığını adet ve ciro bazında gösterir.
+    """
     def __init__(self, veritabani_yoneticisi, parent=None):
         super().__init__(parent)
         self.veritabani = veritabani_yoneticisi
@@ -1182,6 +1360,10 @@ class SatisRaporuSayfasi(QWidget):
 
 
 class DusukStokSayfasi(QWidget):
+    """
+    Kritik stok seviyesinin altına düşen ürünleri acil sipariş listesi şeklinde gösterir.
+    Stok takibi için hayati öneme sahiptir.
+    """
     def __init__(self, veritabani_yoneticisi, parent=None):
         super().__init__(parent)
         self.veritabani = veritabani_yoneticisi
@@ -1253,6 +1435,10 @@ class DusukStokSayfasi(QWidget):
 
 
 class StokHareketSayfasi(QWidget):
+    """
+    Tüm stok giriş-çıkış işlemlerinin (Log) tutulduğu ve görüntülendiği sayfadır.
+    Hatalı işlemler buradan geri alınabilir (Undo).
+    """
     def __init__(self, veritabani_yoneticisi, kullanici_adi, parent=None):
         super().__init__(parent)
         self.veritabani = veritabani_yoneticisi
@@ -1361,6 +1547,7 @@ class StokHareketSayfasi(QWidget):
         self.rapor_tablosu.setSortingEnabled(True)
 
     def menu_goster(self, pos):
+        """Tablo satırına sağ tıklandığında 'Geri Al' menüsünü açar."""
         item = self.rapor_tablosu.itemAt(pos)
         if not item: return
         menu = QMenu(self)
@@ -1373,6 +1560,7 @@ class StokHareketSayfasi(QWidget):
         menu.exec(self.rapor_tablosu.viewport().mapToGlobal(pos))
 
     def hareketi_geri_al(self, hareket_id):
+        """Seçilen işlemi geri almak için onay ister ve veritabanı metodunu çağırır."""
         msg = QMessageBox(self)
         msg.setWindowTitle("Geri Alma Onayı")
         msg.setText("Bu işlemi geri almak istediğinize emin misiniz?\nStok miktarı işlem öncesine döndürülecek.")
@@ -1395,6 +1583,10 @@ class StokHareketSayfasi(QWidget):
 
 
 class AnaStokSayfasi(QWidget):
+    """
+    Uygulamanın ana ekranıdır. Tüm ürünlerin listelendiği, arama/filtreleme
+    yapılabildiği ve temel stok işlemlerinin (Ekle/Sil/Düzenle) yönetildiği merkezdir.
+    """
     def __init__(self, veritabani_yoneticisi, status_bar, kullanici_adi):
         super().__init__()
         self.veritabani = veritabani_yoneticisi
@@ -1408,6 +1600,7 @@ class AnaStokSayfasi(QWidget):
         self.stogu_guncelle_arayuz()
 
     def create_metric_card(self, parent_layout, title, value, unit):
+        """Ana sayfa üstündeki özet bilgi kutucuklarını oluşturur."""
         card_frame = QFrame()
         card_frame.setObjectName("metricCard")
         card_layout = QVBoxLayout(card_frame)
@@ -1547,6 +1740,10 @@ class AnaStokSayfasi(QWidget):
             self.metric_cards['dusuk_stok'].style().polish(self.metric_cards['dusuk_stok'])
 
     def stogu_guncelle_arayuz(self, urun_listesi=None):
+        """
+        Tablodaki verileri veritabanından çekerek yeniler.
+        Ayrıca dashboard kartlarındaki özet verileri de günceller.
+        """
         self.guncelle_dashboard()
         try:
             self.stok_tablosu.itemChanged.disconnect(self.hucre_degisikligini_kaydet)
@@ -1849,6 +2046,10 @@ class AnaStokSayfasi(QWidget):
             self.status_bar.showMessage(f"'{urun_adi}' silindi.", 3000)
 
     def verileri_disa_aktar(self):
+        """
+        Mevcut stok listesini Excel (.xlsx) veya CSV formatında dışa aktarır.
+        Excel için 'openpyxl' kütüphanesini kullanır.
+        """
         # Kullanıcıya Excel mi CSV mi seçtirmek için filtreleri ayarlıyoruz
         filtreler = "Excel Dosyası (*.xlsx);;CSV Dosyası (*.csv)"
         kayit_yolu, secilen_filtre = QFileDialog.getSaveFileName(
@@ -1915,6 +2116,10 @@ class AnaStokSayfasi(QWidget):
 
 
     def hucre_degisikligini_kaydet(self, item):
+        """
+        Tablo üzerinde hücreye çift tıklayarak yapılan değişiklikleri algılar ve kaydeder.
+        Sadece Fiyat ve Kategori sütunları düzenlenebilir.
+        """
         satir, sutun = item.row(), item.column()
         try:
             urun_kodu_item = self.stok_tablosu.item(satir, 1)
@@ -1949,6 +2154,10 @@ class AnaStokSayfasi(QWidget):
 # =============================================================================
 
 class ThemeToggleButton(QWidget):
+    """
+    Aydınlık/Karanlık mod arasında geçiş sağlayan animasyonlu anahtar (Toggle Switch).
+    Güneş ve Ay ikonları ile görselleştirilmiştir.
+    """
     toggled = pyqtSignal(bool)  # Signal to emit when toggled (True=Dark, False=Light)
 
     def __init__(self, parent=None, is_dark=True):
@@ -2295,6 +2504,10 @@ class SimpleChartWidget(QWidget):
 
 
 class ChartDetailDialog(QDialog):
+    """
+    Dashboard grafiklerine tıklandığında açılan, grafiği daha büyük gösteren
+    ve verileri tablo halinde sunan detay penceresi.
+    """
     def __init__(self, chart_type, title, data, is_dark=True, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Detay: {title}")
@@ -2378,6 +2591,10 @@ class ChartDetailDialog(QDialog):
 
 
 class ClickableCard(QFrame):
+    """
+    Tıklanabilir özellik kazandırılmış QFrame.
+    Dashboard üzerindeki özet kartların sayfa yönlendirmesi yapabilmesi için kullanılır.
+    """
     clicked = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -2392,6 +2609,10 @@ class ClickableCard(QFrame):
 
 
 class DashboardPage(QWidget):
+    """
+    Uygulamanın başlangıç ekranı (Kontrol Paneli).
+    Kritik metrikleri, grafikleri ve özet bilgileri bir arada sunar.
+    """
     navigation_requested = pyqtSignal(int)  # Sinyal: Ana pencereye gitmesi gereken sayfa indexini bildir
 
     def __init__(self, veritabani_yoneticisi, parent=None):
@@ -2549,6 +2770,7 @@ class DashboardPage(QWidget):
         dialog.exec()
 
     def refresh_data(self):
+        """Tüm grafik ve kart verilerini veritabanından tazeleyerek yeniden çizer."""
         try:
             # 1. Kart Verileri
             genel = self.veritabani.genel_bakis_getir()
@@ -3019,6 +3241,11 @@ class TourOverlay(QWidget):
 # =============================================================================
 
 class AnaPencere(QMainWindow):
+    """
+    Uygulamanın ana çerçevesi (Main Window).
+    Sol taraftaki sidebar ve sağ taraftaki içerik alanını (Stacked Widget) yönetir.
+    Kullanıcı etkileşimlerini (Menü, Sayfa Geçişleri, Dialoglar) koordine eder.
+    """
     cikis_istendi = pyqtSignal()
 
     def __init__(self, kullanici_adi, veritabani_yoneticisi):
@@ -3245,11 +3472,15 @@ class AnaPencere(QMainWindow):
         self.uygula_tema_degisikligi()
 
     def tema_degistir_toggle(self, is_dark):
-        """Toggle butonundan gelen sinyal"""
+        """Toggle butonundan gelen sinyalle temayı değiştirir."""
         self.koyu_tema_aktif = is_dark
         self.uygula_tema_degisikligi()
 
     def uygula_tema_degisikligi(self):
+        """
+        Seçilen temayı (Açık/Koyu) tüm uygulamaya uygular.
+        Geçiş sırasında ekran görüntüsü alarak 'fade' animasyonu yapar.
+        """
         # --- ANIMASYON BAŞLANGICI ---
         # 1. Mevcut ekranın görüntüsünü al
         try:
@@ -3375,7 +3606,7 @@ class AnaPencere(QMainWindow):
                                 "Tüm hakları saklıdır © 2025")
 
     def oturumu_kapat(self):
-        """Onay sormadan direkt çıkış yapar."""
+        """Mevcut oturumu kapatır ve kontrolcüye sinyal göndererek giriş ekranına dönülmesini sağlar."""
         self.cikis_istendi.emit()  # Kontrolcüye haber ver (Giriş ekranını açar)
         self.close()
 
@@ -3627,6 +3858,10 @@ class AnaPencere(QMainWindow):
 
 # --- BURADAKİ DEĞİŞİKLİK: QWidget yerine QDialog yapıldı ---
 class BaseAuthWindow(QDialog):
+    """
+    Giriş, Kayıt ve Şifre Değiştirme ekranları için temel (parent) sınıf.
+    Ortak tasarım özelliklerini (Logo, ortalama, tema) barındırır.
+    """
     def __init__(self, title, size=(400, 300)):
         super().__init__()
         self.setWindowTitle(title)
@@ -3677,6 +3912,9 @@ class BaseAuthWindow(QDialog):
 
 
 class IlkKurulumPenceresi(BaseAuthWindow):
+    """
+    Veritabanında hiç kullanıcı yoksa açılan ilk kurulum ve yönetici oluşturma ekranı.
+    """
     kurulum_tamamlandi = pyqtSignal()
 
     def __init__(self, veritabani_yoneticisi):
@@ -3718,6 +3956,10 @@ class IlkKurulumPenceresi(BaseAuthWindow):
 
 
 class GirisPenceresi(BaseAuthWindow):
+    """
+    Standart kullanıcı giriş ekranı.
+    Kullanıcı adı ve şifre doğrulaması yapar.
+    """
     login_basarili = pyqtSignal(str)
     degistirme_penceresi_iste = pyqtSignal()
     yeni_kullanici_iste = pyqtSignal()
@@ -3768,6 +4010,10 @@ class GirisPenceresi(BaseAuthWindow):
 
 
 class KullaniciDegistirPenceresi(BaseAuthWindow):
+    """
+    Mevcut kullanıcının şifresini veya adını değiştirmek için kullandığı form.
+    Güvenlik için eski şifreyi de ister.
+    """
     def __init__(self, veritabani_yoneticisi, mevcut_kullanici_adi=None):
         super().__init__("Bilgileri Değiştir", (450, 480))
         self.veritabani = veritabani_yoneticisi
@@ -3838,6 +4084,10 @@ class KullaniciDegistirPenceresi(BaseAuthWindow):
 # =============================================================================
 
 class AnaKontrolcu:
+    """
+    Uygulamanın akışını (Flow Controller) yöneten ana sınıf.
+    Hangi pencerenin (Giriş mi, Ana Ekran mı, Kurulum mu) gösterileceğine karar verir.
+    """
     def __init__(self):
         self.veritabani = VeritabaniYoneticisi()
         self.login_penceresi = self.ana_pencere = self.mevcut_pencere = None
